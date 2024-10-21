@@ -24,7 +24,7 @@ class MultiHeadDiffAttention(nn.Module):
         self.lambda_q2 = nn.Parameter(torch.zeros(config.n_embed, dtype=torch.float32).normal_(mean=0.0, std=0.1))
         self.lambda_k2 = nn.Parameter(torch.zeros(config.n_embed, dtype=torch.float32).normal_(mean=0.0, std=0.1))
 
-        # self.RMSNorm = nn.RMSNorm(config.n_embed, config.n_ctx,)
+        self.RMSNorm = nn.RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=False)
 
         self.register_buffer("mask", torch.tril(torch.ones(config.n_ctx, config.n_ctx)).view(1, 1, config.n_ctx, config.n_ctx))
 
@@ -50,8 +50,9 @@ class MultiHeadDiffAttention(nn.Module):
 
         attn_score = F.softmax(attn1 - lambda_ * attn2, dim=-1)
 
-        diff_attn = attn_score @ v # (B, n_head, T, head_dim)
+        diff_attn = attn_score @ v # (B, n_head, T, 2*head_dim)
 
+        diff_attn = self.RMSNorm(diff_attn)
         diff_attn = (1 - self.lambda_init) * diff_attn
 
         diff_attn = diff_attn.transpose(1, 2).contiguous().view(B, T, 2*C)
@@ -59,6 +60,27 @@ class MultiHeadDiffAttention(nn.Module):
         score = self.c_proj(diff_attn)
 
         return score
+    
+class GatedFFN(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.n_embed = config.n_embed
+
+        self.W_1 = nn.Linear(config.n_embed, int(config.n_embed * 8.0 / 3.0), bias=False)
+        self.W_G = nn.Linear(config.n_embed, int(config.n_embed * 8.0 / 3.0), bias=False)
+        self.W_2 = nn.Linear(int(config.n_embed * 8.0 / 3.0), config.n_embed)
+
+        # Swish activation function
+        self.SiLU = nn.SiLU()
+
+    def forward(self, x):
+        x = self.W_1(x) * self.SiLU(self.W_G(x))
+        x = self.W_2(x)
+
+        return x
+        
+
 
 
         

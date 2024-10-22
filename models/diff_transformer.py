@@ -26,7 +26,7 @@ class MultiHeadDiffAttention(nn.Module):
 
         self.RMSNorm = nn.RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=False)
 
-        self.register_buffer("mask", torch.tril(torch.ones(config.n_ctx, config.n_ctx)).view(1, 1, config.n_ctx, config.n_ctx))
+        # self.register_buffer("mask", torch.tril(torch.ones(config.n_ctx, config.n_ctx)).view(1, 1, config.n_ctx, config.n_ctx))
 
     def forward(self, x,):
         B, T, C = x.shape
@@ -126,16 +126,15 @@ class DifferentialTransformer(nn.Module):
 
 
         
-        
 if __name__ == "__main__":
-    from config import ToyTransConfig, StableLM3BConfig
+    from config import StableLMConfig, CONFIG_ARGS
 
     # config = ToyTransConfig()
     # model = MultiHeadDiffAttention(config, 1)
 
     # x = torch.randn(1, config.n_ctx, config.n_embed)
     # output = model(x)
-    model = DifferentialTransformer(StableLM3BConfig())
+    model = DifferentialTransformer(StableLMConfig(**CONFIG_ARGS["2.8B"]))
     print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
 
 

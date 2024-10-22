@@ -19,10 +19,10 @@ class MultiHeadDiffAttention(nn.Module):
         self.head_dim = config.n_embed // config.n_head // 2
 
         self.lambda_init = lambda_init(layer)
-        self.lambda_q1 = nn.Parameter(torch.zeros(config.n_embed, dtype=torch.float32).normal_(mean=0.0, std=0.1))
-        self.lambda_k1 = nn.Parameter(torch.zeros(config.n_embed, dtype=torch.float32).normal_(mean=0.0, std=0.1))
-        self.lambda_q2 = nn.Parameter(torch.zeros(config.n_embed, dtype=torch.float32).normal_(mean=0.0, std=0.1))
-        self.lambda_k2 = nn.Parameter(torch.zeros(config.n_embed, dtype=torch.float32).normal_(mean=0.0, std=0.1))
+        self.lambda_q1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
+        self.lambda_k1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
+        self.lambda_q2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
+        self.lambda_k2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
 
         self.RMSNorm = nn.RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=False)
 
@@ -69,7 +69,7 @@ class GatedFFN(nn.Module):
 
         self.W_1 = nn.Linear(config.n_embed, int(config.n_embed * 8.0 / 3.0), bias=False)
         self.W_G = nn.Linear(config.n_embed, int(config.n_embed * 8.0 / 3.0), bias=False)
-        self.W_2 = nn.Linear(int(config.n_embed * 8.0 / 3.0), config.n_embed)
+        self.W_2 = nn.Linear(int(config.n_embed * 8.0 / 3.0), config.n_embed, bias=False)
 
         # Swish activation function
         self.SiLU = nn.SiLU()
@@ -80,39 +80,63 @@ class GatedFFN(nn.Module):
 
         return x
         
+class Block(nn.Module):
+    def __init__(self, config, layer):
+        super().__init__()
+
+        self.attn = MultiHeadDiffAttention(config, layer)
+        self.ffn = GatedFFN(config)
+
+        self.RMSNorm = nn.RMSNorm(config.n_embed, eps=1e-5, elementwise_affine=False)
+
+    def forward(self, x):
+        x = self.attn(self.RMSNorm(x)) + x
+        x = self.ffn(self.RMSNorm(x)) + x
+
+        return x
+
+class DifferentialTransformer(nn.Module):
+    def __init__(self, config,):
+        super().__init__()
+
+        self.config = config
+
+        self.blocks = nn.ModuleList([Block(config, i+1) for i in range(config.n_layer)])
+        self.wte = nn.Embedding(config.n_vocab, config.n_embed) # Token embeddings
+        self.wpe = nn.Embedding(config.n_ctx, config.n_embed) # Positional Embeddings
+
+        self.lm_head = nn.Linear(config.n_embed, config.n_vocab, bias=False)
+
+
+        # Weight Sharing Scheme per Vaswani et al (2017)
+        self.lm_head.weight = self.wte.weight
+
+    
+    
+    def forward(self, x):
+        assert x.size(1) <= self.config.n_ctx, "Context length exceeds model's maximum context length"
+        x = self.wte(x) + self.wpe(torch.arange(x.size(1), device=x.device))
+
+        for block in self.blocks:
+            x = block(x)
+
+        logits = self.lm_head(x)
+        return logits
 
 
 
         
         
 if __name__ == "__main__":
-    from config import ToyTransConfig
+    from config import ToyTransConfig, StableLM3BConfig
 
-    config = ToyTransConfig()
-    model = MultiHeadDiffAttention(config, 1)
+    # config = ToyTransConfig()
+    # model = MultiHeadDiffAttention(config, 1)
 
-    x = torch.randn(1, config.n_ctx, config.n_embed)
-    output = model(x)
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-        
-
-
-
-
-
+    # x = torch.randn(1, config.n_ctx, config.n_embed)
+    # output = model(x)
+    model = DifferentialTransformer(StableLM3BConfig())
+    print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
 
 
 

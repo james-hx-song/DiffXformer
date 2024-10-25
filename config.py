@@ -5,6 +5,8 @@ class ToyTransConfig:
     n_embed: int = 32
     n_head: int = 4
     n_ctx: int = 16
+    n_layer: int = 4
+    n_vocab: int = 100288
 
 @dataclass
 class StableLMConfig:

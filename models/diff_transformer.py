@@ -134,8 +134,11 @@ if __name__ == "__main__":
 
     # x = torch.randn(1, config.n_ctx, config.n_embed)
     # output = model(x)
-    model = DifferentialTransformer(StableLMConfig(**CONFIG_ARGS["2.8B"]))
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
-
-
+    # model = DifferentialTransformer(StableLMConfig(**CONFIG_ARGS["2.8B"]))
+    # print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
+    model = DifferentialTransformer(StableLMConfig(**CONFIG_ARGS["830M"]))
+    x = torch.randint(0, 100, (1, 16))
+    print(x.shape)
+    output = model(x)
+    print(output.shape)
 

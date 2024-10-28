@@ -67,7 +67,7 @@ for i in range(max_iters):
     optimizer.zero_grad()
 
     logits = model(x)
-    print(f"Logits: {logits.shape} | y: {y.shape}")
+    # print(f"Logits: {logits.shape} | y: {y.shape}")
     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
     
 

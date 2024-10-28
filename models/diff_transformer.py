@@ -49,8 +49,15 @@ class MultiHeadDiffAttention(nn.Module):
 
         # Scaled dot product attention
         if self.flash:
-            A1 = F.scaled_dot_product_attention(q1, k1, v, is_causal=True)
-            A2 = F.scaled_dot_product_attention(q2, k2, v, is_causal=True)
+            v1, v2 = torch.split(v, [self.head_dim, self.head_dim], dim=-1)
+
+            A11 = F.scaled_dot_product_attention(q1, k1, v1, is_causal=True)
+            A12 = F.scaled_dot_product_attention(q1, k2, v2, is_causal=True)
+            A1 = torch.cat([A11, A12], dim=-1)
+
+            A21 = F.scaled_dot_product_attention(q2, k2, v1, is_causal=True)
+            A22 = F.scaled_dot_product_attention(q2, k2, v2, is_causal=True)
+            A2 = torch.cat([A21, A22], dim=-1)
 
             diff_attn = A1 - lambda_ * A2
         else:

@@ -8,7 +8,7 @@ def lambda_init(layer):
 
 
 class MultiHeadDiffAttention(nn.Module):
-    def __init__(self, config, layer):
+    def __init__(self, config, layer, flash=True):
         super().__init__()
 
         # Note: Diff Transformer splits head dims as: d_k = d / 2h
@@ -26,7 +26,10 @@ class MultiHeadDiffAttention(nn.Module):
 
         self.RMSNorm = nn.RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=False)
 
-        # self.register_buffer("mask", torch.tril(torch.ones(config.n_ctx, config.n_ctx)).view(1, 1, config.n_ctx, config.n_ctx))
+        self.flash = flash
+
+        if not flash:
+            self.register_buffer("mask", torch.tril(torch.ones(config.n_ctx, config.n_ctx)).view(1, 1, config.n_ctx, config.n_ctx))
 
     def forward(self, x,):
         B, T, C = x.shape
@@ -44,13 +47,21 @@ class MultiHeadDiffAttention(nn.Module):
 
         lambda_ = torch.exp(torch.dot(self.lambda_q1, self.lambda_k1)) - torch.exp(torch.dot(self.lambda_q2, self.lambda_k2)) + self.lambda_init
 
-        # Scaled dot product (Naive)
-        attn1 = q1 @ k1.transpose(-1, -2) * (self.head_dim ** -0.5)
-        attn2 = q2 @ k2.transpose(-1, -2) * (self.head_dim ** -0.5)
+        # Scaled dot product attention
+        if self.flash:
+            A1 = F.scaled_dot_product_attention(q1, k1, v, is_causal=True)
+            A2 = F.scaled_dot_product_attention(q2, k2, v, is_causal=True)
 
-        attn_score = F.softmax(attn1 - lambda_ * attn2, dim=-1)
+            diff_attn = A1 - lambda_ * A2
+        else:
+            attn1 = q1 @ k1.transpose(-1, -2) * (self.head_dim ** -0.5)
+            attn2 = q2 @ k2.transpose(-1, -2) * (self.head_dim ** -0.5)
 
-        diff_attn = attn_score @ v # (B, n_head, T, 2*head_dim)
+            attn = attn1 - lambda_ * attn2
+            attn = attn.masked_fill(self.mask[:, :, :T, :T] == 0, float('-inf'))
+
+            attn_score = F.softmax(attn, dim=-1)
+            diff_attn = attn_score @ v # (B, n_head, T, 2*head_dim)
 
         diff_attn = self.RMSNorm(diff_attn)
         diff_attn = (1 - self.lambda_init) * diff_attn
@@ -134,8 +145,8 @@ if __name__ == "__main__":
 
     # x = torch.randn(1, config.n_ctx, config.n_embed)
     # output = model(x)
-    # model = DifferentialTransformer(StableLMConfig(**CONFIG_ARGS["2.8B"]))
-    # print(f"Number of parameters: {sum(p.numel() for p in model.parameters())}")
+    # model = DifferentialTransformer(StableLMConfig())
+    # print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     model = DifferentialTransformer(StableLMConfig(**CONFIG_ARGS["830M"]))
     x = torch.randint(0, 100, (1, 16))
     print(x.shape)

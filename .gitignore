@@ -163,3 +163,4 @@ cython_debug/
 *.txt
 !requirements.txt
 *.npy
+.DS_Store

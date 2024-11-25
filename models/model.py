@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchtune as tt
 import math
 
 
@@ -31,20 +32,34 @@ class MultiHeadDiffAttention(nn.Module):
 
         self.RMSNorm = nn.RMSNorm(
             2 * self.head_dim, eps=1e-5, elementwise_affine=False)
+        
+        self.rope = tt.modules.RotaryPositionalEmbeddings(dim=self.head_dim, max_seq_len=config.n_ctx, base=10000)
 
 
     def forward(self, x,):
         B, T, C = x.shape
         # Note: C = config.n_embed
-        C = C // 2
 
         qkv = self.c_attn(x)
-        q1, k1, q2, k2, v = torch.split(qkv, [C, C, C, C, 2*C], dim=-1)
+        # q1, k1, q2, k2, v = torch.split(qkv, [C, C, C, C, 2*C], dim=-1)
+        q, k, v = torch.split(qkv, [C, C, C], dim=-1)
 
-        q1 = q1.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, n_head, T, head_dim = d_k)
-        k1 = k1.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        q2 = q2.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        k2 = k2.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        q = q.view(B, T, 2 * self.n_head, self.head_dim)
+        k = k.view(B, T, 2 * self.n_head, self.head_dim)
+
+        q = self.rope(q)
+        k = self.rope(k)
+
+        q1, q2 = torch.split(q, [self.n_head, self.n_head], dim=-2)
+        k1, k2 = torch.split(k, [self.n_head, self.n_head], dim=-2)
+
+        q1, q2 = q1.transpose(1, 2), q2.transpose(1, 2)
+        k1, k2 = k1.transpose(1, 2), k2.transpose(1, 2)
+
+        # q1 = q1.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, n_head, T, head_dim = d_k)
+        # k1 = k1.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        # q2 = q2.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        # k2 = k2.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, 2*self.head_dim).transpose(1, 2)
 
         lambda_ = torch.exp(torch.dot(self.lambda_q1, self.lambda_k1)) - \
@@ -60,7 +75,7 @@ class MultiHeadDiffAttention(nn.Module):
         diff_attn = self.RMSNorm(diff_attn)
         diff_attn = (1 - self.lambda_init) * diff_attn
 
-        diff_attn = diff_attn.transpose(1, 2).contiguous().view(B, T, 2*C)
+        diff_attn = diff_attn.transpose(1, 2).contiguous().view(B, T, C)
 
         score = self.c_proj(diff_attn)
 
@@ -79,15 +94,20 @@ class MultiHeadAttention(nn.Module):
 
         self.RMSNorm = nn.RMSNorm(
             self.head_dim, eps=1e-5, elementwise_affine=False)
+        
+        self.rope = tt.modules.RotaryPositionalEmbeddings(dim=self.head_dim, max_seq_len=config.n_ctx, base=10000)
 
     def forward(self, x):
         B, T, C = x.shape
         qkv = self.c_attn(x)
         q, k, v = torch.split(qkv, [C, C, C], dim=-1)
 
-        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, n_head, T, head_dim = d_k)
-        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        q = q.view(B, T, self.n_head, self.head_dim)  # (B, n_head, T, head_dim = d_k)
+        k = k.view(B, T, self.n_head, self.head_dim)
+        v = v.view(B, T, self.n_head, self.head_dim)
+
+        q = self.rope(q)
+        k = self.rope(k)
 
         attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
@@ -139,7 +159,7 @@ class Block(nn.Module):
         return x
 
 
-class DifferentialTransformer(nn.Module):
+class TransModel(nn.Module):
     def __init__(self, config,):
         super().__init__()
 
@@ -147,8 +167,6 @@ class DifferentialTransformer(nn.Module):
 
         self.blocks = nn.ModuleList([Block(config, i+1) for i in range(config.n_layer)])
         self.wte = nn.Embedding(config.n_vocab, config.n_embed)  # Token embeddings
-        # Positional Embeddings
-        self.wpe = nn.Embedding(config.n_ctx, config.n_embed)
 
         self.lm_head = nn.Linear(config.n_embed, config.n_vocab, bias=False)
 
@@ -157,7 +175,7 @@ class DifferentialTransformer(nn.Module):
 
     def forward(self, x):
         assert x.size(1) <= self.config.n_ctx, "Context length exceeds model's maximum context length"
-        x = self.wte(x) + self.wpe(torch.arange(x.size(1), device=x.device))
+        x = self.wte(x)
 
         for block in self.blocks:
             x = block(x)
@@ -176,7 +194,7 @@ if __name__ == "__main__":
     # output = model(x)
     # model = DifferentialTransformer(StableLMConfig())
     # print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    model = DifferentialTransformer(StableLMConfig(**CONFIG_ARGS["830M"]))
+    model = TransModel(StableLMConfig(**CONFIG_ARGS["830M"]))
     x = torch.randint(0, 100, (1, 16))
     print(x.shape)
     output = model(x)

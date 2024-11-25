@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 
 import time
-from models.diff_transformer import DifferentialTransformer
+from models.model import TransModel
 from config import StableLMConfig, CONFIG_ARGS, ToyTransConfig
 
 device = 'cpu'
@@ -50,7 +50,7 @@ def get_batch(mode="train"):
     return x, y
 
 # ------ Training Loop ------ #
-model = DifferentialTransformer(model_config)
+model = TransModel(model_config)
 print(f"Model has: {sum(p.numel() for p in model.parameters())} parameters.")
 optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, betas=betas, weight_decay=weight_decay)
 

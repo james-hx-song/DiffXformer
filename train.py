@@ -1,87 +1,107 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
 
 import time
 from models.diff_transformer import DifferentialTransformer
-from config import StableLMConfig, CONFIG_ARGS, ToyTransConfig
+from config import StableLMConfig, VANILLA_CONFIG_ARGS, DIFF_CONFIG_ARGS, ToyTransConfig
+from datasets import load_dataset
+from transformers import AutoTokenizer
 
-device = 'cpu'
-if torch.cuda.is_available():
-    device = 'cuda'
-# elif hasattr(torch.backends, 'mps') and torch.mps.is_available():
-#     device = 'mps'
+device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
+
+
 # --------- Dataset Loading --------- #
-dataset = "shakespeare"
-train_data = np.memmap(f"dataset/{dataset}/train.npy", dtype=np.uint32, mode="r")
-val_data = np.memmap(f"dataset/{dataset}/val.npy", dtype=np.uint32, mode="r")
 
-print(f"Train Data: {train_data.shape} | Val Data: {val_data.shape}")
-# ------ Model Configuration & Hyperparameters ------ #
-# param = "830M"
-# model_config = StableLMConfig(**CONFIG_ARGS[param])
-model_config = ToyTransConfig()
 
-betas = (0.9, 0.95)
-min_lr = 1.28e-5
-max_lr = 3.2e-4
-warmup_steps = 1000
-max_iters = 3000
+def prepareDataset(batch_size: int):
+    # Load the dataset
+    ds = load_dataset(
+        "HuggingFaceTB/smollm-corpus",
+        "fineweb-edu-dedup",
+        split="train",
+        streaming=True,
+    )
 
-def get_lr(step):
-    if step < warmup_steps:
-        return max_lr * step / warmup_steps
-    
-    return max_lr - (step - warmup_steps) * (max_lr - min_lr) / (max_iters - warmup_steps)
+    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/smollm-corpus")
 
-batch_size = 1
-n_ctx = model_config.n_ctx
+    hugging_face_wrapper = HuggingFaceDatasetWrapper(ds, tokenizer)
 
-def get_batch(mode="train"):
-    data = train_data if mode == "train" else val_data
-    idx = np.random.randint(len(data) - n_ctx, size=batch_size)
+    dataloader = DataLoader(hugging_face_wrapper, batch_size=batch_size, shuffle=True)
+    return dataloader
 
-    x = torch.from_numpy(np.stack([data[j:j+n_ctx].astype(dtype=np.int64) for j in idx]))
-    y = torch.from_numpy(np.stack([data[j+1:j+n_ctx+1].astype(dtype=np.int64) for j in idx]))
 
-    return x, y
+class HuggingFaceDatasetWrapper(Dataset):
+    def __init__(self, hf_dataset, tokenizer, max_length=128):
+        self.dataset = hf_dataset
+        self.tokenizer = tokenizer
+        self.max_length = max_length
 
-# ------ Training Loop ------ #
-model = DifferentialTransformer(model_config)
-print(f"Model has: {sum(p.numel() for p in model.parameters())} parameters.")
-optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, betas=betas)
+    def __len__(self):
+        return len(self.dataset)
 
-model.to(device)
-model.train()
+    def __getitem__(self, idx):
+        example = self.dataset[idx]
+        tokenized = self.tokenizer(
+            example["text"],
+            padding="max_length",
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
+        # now get the text (x) and the label (y)
+        # the label is just x shifted by one token
+        x = tokenized["input_ids"].squeeze()
+        y = x.clone()
+        y = torch.cat((x[1:], torch.tensor([-100], dtype=x.dtype)))
+        return x, y
 
-for i in range(max_iters):
-    x, y = get_batch("train")
-    x, y = x.to(device), y.to(device)
 
-    # print(f"Training on x: {x.shape} | y: {y.shape}")
+class Trainer:
+    def __init__(
+        self,
+        model,
+        config,
+        dataloader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        gpu_id: int,
+        save_every: int,
+        max_iters: int,
+    ):
+        self.model = model.to(gpu_id)
+        self.model = DDP(model, device_ids=[gpu_id])
+        self.config = config
+        self.dataloader = dataloader
+        self.optimizer = optimizer
+        self.gpu_id = gpu_id
+        self.save_every = save_every
+        self.current_iter = 0
 
-    t0 = time.time()
+        def _run_batch(self, x, y):
+            self.optimizer.zero_grad()
+            output = self.model(x)
+            loss = F.cross_entropy(output, y)
+            loss.backward()
+            self.optimizer.step()
 
-    optimizer.zero_grad()
+        def train(self):
+            self.model.train()
+            while self.current_iter < self.max_iters:
+                for x, y in self.dataloader:
+                    x, y = x.to(self.gpu_id), y.to(self.gpu_id)
+                    self._run_batch(x, y)
+                    self.current_iter += 1
+                    if self.current_iter % self.save_every == 0:
+                        self.save_model()
 
-    logits = model(x)
-    # print(f"Logits: {logits.shape} | y: {y.shape}")
-    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-    
 
-    loss.backward()
-
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = get_lr(i+1)
-    
-    optimizer.step()
-
-    t1 = time.time()
-
-    if device == "cuda":
-        torch.cuda.synchronize()
-
-    print(f"Iteration {i+1} | Loss: {loss.item()} | Time: {t1-t0:.3f}")
-
+def main():
+    # Hyperpraameters
+    max_iters = 200
+    batch_size = 64
+    # This is the context length of the model. The smoll LLM models use 2048. Longer will make training slower.
+    max_length = 1024

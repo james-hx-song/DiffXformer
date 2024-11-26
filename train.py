@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 
 import time
-from models.diff_transformer import DifferentialTransformer
+from models.model import TransModel
 from config import StableLMConfig, CONFIG_ARGS, ToyTransConfig
 
 device = 'cpu'
@@ -29,6 +29,7 @@ min_lr = 1.28e-5
 max_lr = 3.2e-4
 warmup_steps = 1000
 max_iters = 3000
+weight_decay = 0.05
 
 def get_lr(step):
     if step < warmup_steps:
@@ -49,9 +50,9 @@ def get_batch(mode="train"):
     return x, y
 
 # ------ Training Loop ------ #
-model = DifferentialTransformer(model_config)
+model = TransModel(model_config)
 print(f"Model has: {sum(p.numel() for p in model.parameters())} parameters.")
-optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, betas=betas)
+optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, betas=betas, weight_decay=weight_decay)
 
 model.to(device)
 model.train()
@@ -66,15 +67,17 @@ for i in range(max_iters):
 
     optimizer.zero_grad()
 
-    logits = model(x)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits = model(x)
     # print(f"Logits: {logits.shape} | y: {y.shape}")
     loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
     
 
     loss.backward()
 
+    lr = get_lr(i+1)
     for param_group in optimizer.param_groups:
-        param_group['lr'] = get_lr(i+1)
+        param_group['lr'] = lr
     
     optimizer.step()
 
@@ -83,5 +86,5 @@ for i in range(max_iters):
     if device == "cuda":
         torch.cuda.synchronize()
 
-    print(f"Iteration {i+1} | Loss: {loss.item()} | Time: {t1-t0:.3f}")
+    print(f"Iteration {i+1:<15} | Loss: {loss.item():<8.3f} | Time: {(t1-t0)*1000:<15.3f}ms")
 

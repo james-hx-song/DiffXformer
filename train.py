@@ -3,9 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
 import numpy as np
 
 import time
+import os
 from models.diff_transformer import DifferentialTransformer
 from config import StableLMConfig, VANILLA_CONFIG_ARGS, DIFF_CONFIG_ARGS, ToyTransConfig
 from datasets import load_dataset
@@ -16,6 +18,18 @@ print(f"Using device: {device}")
 
 
 # --------- Dataset Loading --------- #
+
+
+def ddp_setup(rank, world_size):
+    """
+    Args:
+        rank: Unique identifier of each process
+        world_size: Total number of processes
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    torch.cuda.set_device(rank)
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
 def prepareDataset(batch_size: int):
@@ -88,6 +102,28 @@ class Trainer:
             loss.backward()
             self.optimizer.step()
 
+        def _save_checkpoint(self):
+            checkpoint = {
+                "model_state_dict": self.model.module.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "current_iteration": self.current_iter,
+                "sampler_state": self.dataloader.sampler.state_dict(),  # Save the state of the sampler
+            }
+            torch.save(checkpoint, self.checkpoint_path)
+            print(
+                f"Iteration {self.current_iter} | Training checkpoint saved at {self.checkpoint_path}"
+            )
+
+        def _load_checkpioint(self):
+            checkpoint = torch.load(self.checkpoint_path)
+            self.model.module.load_state_dict(checkpoint["model_state_dict"])
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self.current_iteration = checkpoint["current_iteration"]
+            self.dataloader.sampler.load_state_dict(checkpoint["sampler_state"])
+            print(
+                f"Checkpoint loaded from {self.checkpoint_path} at iteration {self.current_iter}"
+            )
+
         def train(self):
             self.model.train()
             while self.current_iter < self.max_iters:
@@ -96,7 +132,7 @@ class Trainer:
                     self._run_batch(x, y)
                     self.current_iter += 1
                     if self.current_iter % self.save_every == 0:
-                        self.save_model()
+                        self._save_checkpoint()
 
 
 def main():

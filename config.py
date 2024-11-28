@@ -16,6 +16,7 @@ class StableLMConfig:
     n_layer: int = 28
     n_ctx: int = 4096
     n_vocab: int = 100288
+    is_diff: bool = False
 
 CONFIG_ARGS = {
     "830M": dict(n_embed=1536, n_layer=24, n_head=8),

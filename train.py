@@ -8,10 +8,12 @@ import numpy as np
 
 import time
 import os
-from models.diff_transformer import DifferentialTransformer
 from config import StableLMConfig, ToyTransConfig
 from datasets import load_dataset
 from transformers import AutoTokenizer
+
+from models.model import TransModel
+
 
 from typing import Optional
 
@@ -20,7 +22,6 @@ print(f"Using device: {device}")
 
 
 # --------- Dataset Loading --------- #
-
 def load_dataloader(
     batch_size: int,
     tokenizer_name: str,
@@ -249,7 +250,7 @@ def test():
     n_ctx = 64
 
     config = ToyTransConfig(n_ctx=n_ctx)
-    model = DifferentialTransformer(config)
+    model = TransModel(config)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
     train_loader, val_loader = load_dataloader(

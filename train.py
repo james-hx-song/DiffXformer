@@ -8,17 +8,34 @@ import numpy as np
 
 import time
 import os
+import logging
+import wandb
+import sys
 from config import StableLMConfig, ToyTransConfig
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from models.model import TransModel
-
-
 from typing import Optional
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using device: {device}")
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setLevel(logging.INFO)
+
+file_handler = logging.FileHandler("train.log")
+file_handler.setLevel(logging.INFO)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+logger.addHandler(file_handler)
+
+logger.info("Logging system initialized")
+
 
 
 # --------- Dataset Loading --------- #
@@ -32,7 +49,7 @@ def load_dataloader(
     if num_val_samples is None:
         num_val_samples = batch_size
     
-    print("Loading Dataset...")
+    logger.info("Loading Dataset...")
     # Load the dataset
     ds = load_dataset(
         "HuggingFaceTB/smollm-corpus",
@@ -184,7 +201,7 @@ class Trainer:
                 total_loss += loss.item()
                 count += 1
             
-            print(f"Validation Loss: {total_loss / count}")
+            logger.info(f"Validation Loss (Iteration {self.current_iter}): {total_loss / count} in {count} batches")
     def _save_checkpoint(self):
         checkpoint = {
             "model_state_dict": self.model.module.state_dict(),
@@ -193,7 +210,7 @@ class Trainer:
             "sampler_state": self.dataloader.sampler.state_dict(),  # Save the state of the sampler
         }
         torch.save(checkpoint, self.checkpoint_path)
-        print(
+        logger.info(
             f"Iteration {self.current_iter} | Training checkpoint saved at {self.checkpoint_path}"
         )
 
@@ -203,7 +220,7 @@ class Trainer:
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.current_iteration = checkpoint["current_iteration"]
         self.dataloader.sampler.load_state_dict(checkpoint["sampler_state"])
-        print(
+        logger.info(
             f"Checkpoint loaded from {self.checkpoint_path} at iteration {self.current_iter}"
         )
 
@@ -212,6 +229,9 @@ class Trainer:
         self.model.train()
         while self.current_iter < self.max_iters:
             for batch in self.train_loader:
+                
+                if self.current_iter > self.max_iters:
+                    return
 
                 if self.current_iter % self.eval_every == 0:
                     # Evaluate Validation Loss
@@ -227,7 +247,7 @@ class Trainer:
                 self.optimizer.zero_grad()
                 output = self.model(x)
                 loss = F.cross_entropy(output.view(-1, output.size(-1)), y.view(-1), reduction='none')
-                # print(loss.shape, mask.shape)
+                # logger.info(loss.shape, mask.shape)
                 loss = (loss * mask.view(-1)).sum() / mask.sum()
 
                 # loss = F.cross_entropy(output.view(-1, output.size(-1)), y.view(-1))
@@ -236,13 +256,15 @@ class Trainer:
 
                 self.current_iter += 1
                 if self.current_iter % self.save_every == 0:
-                    self.save_checkpoint()
+                    self._save_checkpoint()
 
                 if self.current_iter % 10 == 0:
-                    print(f"Iter: {self.current_iter}, Loss: {loss.item()}")
+                    logger.info(f"Iter: {self.current_iter}, Loss: {loss.item()}")
 
 
-def test():
+def main():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Using device: {device}")
     # Hyperpraameters
     max_iters = 200
     batch_size = 1
@@ -275,6 +297,6 @@ def test():
     trainer.train()
 
 if __name__ == "__main__":
-    test()
-
+    main()
+    pass
 

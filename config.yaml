@@ -1,8 +1,10 @@
-learning_rate: 0.003
+max_learning_rate: 1.28e-4
+min_learning_rate: 5.12e-6
+warmup_steps: 1000
 architecture: DiffFormer
 dataset: HuggingFaceTB/smollm-corpus
-max_iters: 400
-batch_size: 1
-save_every: 100
-eval_every: 100
-num_val_samples: 20
+max_iters: 40000
+batch_size: 4
+save_every: 1000
+eval_every: 1000
+num_val_samples: 500

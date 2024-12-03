@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import numpy as np
@@ -11,32 +11,12 @@ import os
 import wandb
 import yaml
 import sys
-from config import StableLMConfig, ToyTransConfig
+from config import ToyTransConfig, LM_ARGS, LMConfig
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
 from models.model import TransModel
 from typing import Optional
-
-# training_config = dict(
-#     learning_rate=3e-3, 
-#     architecture="DiffFormer",
-#     dataset="HuggingFaceTB/smollm-corpus",
-#     max_iters=400, 
-#     batch_size=1,
-#     save_every=100,
-#     eval_every=100,
-# )
-
-with open("config.yaml", "r") as file:
-    training_config = yaml.safe_load(file)
-
-wandb.init(
-    project="DiffFormer",
-    config=training_config,
-)
-
-
 
 # --------- Dataset Loading --------- #
 def load_dataloader(
@@ -44,27 +24,44 @@ def load_dataloader(
     tokenizer_name: str,
     n_ctx: int,
     num_val_samples: Optional[int] = None,
-    train_skip_samples: Optional[int] = None
+    train_skip_samples: Optional[int] = None,
+    rank: int = 0,
+    world_size: int = 1,
 ):
-    
     if num_val_samples is None:
         num_val_samples = batch_size
 
     if train_skip_samples is None:
         train_skip_samples = 0
-    
-    print("Loading Dataset...")
-    # Load the dataset
+
+    if rank == 0:
+        print("Loading Dataset...")
+    # Load the dataset with streaming=True
     ds = load_dataset(
         "HuggingFaceTB/smollm-corpus",
         "fineweb-edu-dedup",
         split="train",
-        streaming=True,
+        streaming=True,  # Use streaming dataset
     )
+    
+    try:
+        print(ds.info)
+        print(f"Number of examples: {ds.info.splits['train'].num_examples}")
+    except AttributeError:
+        print("Dataset info is not available in streaming mode.")
 
-    print(f"Splitting dataset into {num_val_samples} validation samples, skipping {train_skip_samples} training samples")
+    if rank == 0:
+        print(f"Splitting dataset into {num_val_samples} validation samples, skipping {train_skip_samples} training samples")
+    
+    # Create the validation dataset by taking the first `num_val_samples` samples
     ds_val = ds.take(num_val_samples)
+
+    # Skip validation samples and training samples to be skipped, then shard the dataset
     ds_train = ds.skip(num_val_samples + train_skip_samples)
+
+    # Shard the training and validation datasets across processes
+    ds_train = ds_train.shard(num_shards=world_size, index=rank)
+    ds_val = ds_val.shard(num_shards=world_size, index=rank)
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
@@ -142,8 +139,10 @@ def load_dataloader(
         remove_columns=['text', 'id', 'metadata']
     )
 
-    ds_train_loader= DataLoader(ds_train, batch_size=batch_size,)
-    ds_val_loader = DataLoader(ds_val, batch_size=batch_size,)
+    # Since we're using streaming and sharding, we don't need DistributedSampler
+    # Create DataLoader without sampler
+    ds_train_loader = DataLoader(ds_train, batch_size=batch_size)
+    ds_val_loader = DataLoader(ds_val, batch_size=batch_size)
 
     return ds_train_loader, ds_val_loader
 
@@ -166,43 +165,40 @@ class Trainer:
         model_config,
         training_config,
         optimizer: torch.optim.Optimizer,
+        scheduler,
+        device: str,
         gpu_id: Optional[int],
+        rank: int,
+        world_size: int,
     ):
-        self.model = model.to(gpu_id)
-
-        if gpu_id is not None:
-            self.model = DDP(model, device_ids=[gpu_id])
-
+        self.rank = rank
+        self.world_size = world_size
         self.model_config = model_config
         self.training_config = training_config
         self.train_loader = self.val_loader = None
         self.optimizer = optimizer
-        self.gpu_id = gpu_id if gpu_id is not None else 'cpu'
+        self.scheduler = scheduler
+        self.device = device
         self.save_every = training_config['save_every']
         self.current_iter = 0
         self.max_iters = training_config['max_iters']
         self.eval_every = training_config['eval_every']
         self.batch_idx = 0
 
+        # Wrap the model with DDP
+        self.model = DDP(model, device_ids=[gpu_id], output_device=gpu_id).to(self.device)
+
         self.model_name = "DiffFormer" if model_config.is_diff else "Transformer"
         self.checkpoint_dir = f"checkpoints/{self.model_name}"
 
-        if not os.path.exists(self.checkpoint_dir):
+        if not os.path.exists(self.checkpoint_dir) and self.rank == 0:
             os.makedirs(self.checkpoint_dir)
 
         self._load_checkpoint()
         self._load_dataloader(training_config)
 
     def _load_dataloader(self, training_config):
-        response = input("Load dataset from scratch? (y/n) ")
-
-        if response.lower() == 'y':
-            train_skip_samples = None
-        elif response.lower() == 'n':
-            train_skip_samples = self.batch_idx
-        else:
-            raise ValueError("Invalid input. Please enter y or n.")
-
+        train_skip_samples = self.batch_idx
 
         batch_size = training_config['batch_size']
         n_ctx = self.model_config.n_ctx
@@ -211,15 +207,20 @@ class Trainer:
             batch_size,
             "HuggingFaceTB/SmolLM-135M",
             n_ctx,
-            num_val_samples=self.training_config['num_val_samples'],
-            train_skip_samples=train_skip_samples
+            num_val_samples=self.training_config.get('num_val_samples', batch_size),
+            train_skip_samples=train_skip_samples,
+            rank=self.rank,
+            world_size=self.world_size,
         )
 
 
     def _save_checkpoint(self,):
+        if self.rank != 0:
+            return
         checkpoint = {
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": self.model.module.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
             "current_iteration": self.current_iter,
             "batch_idx": self.batch_idx
         }
@@ -231,7 +232,7 @@ class Trainer:
         )
 
     def _prompt_checkpoint(self):
-        '''Ask user which checkpoint to load'''
+        '''Automatically load the latest checkpoint if available'''
 
         files = [
             f for f in os.listdir(self.checkpoint_dir)
@@ -240,22 +241,15 @@ class Trainer:
         files = sorted(files, key=lambda x: int(x.split('_')[1].split('.pth')[0]))
 
         if len(files) == 0:
-            print("No checkpoints found. Training from scratch")
+            if self.rank == 0:
+                print("No checkpoints found. Training from scratch")
             return None
-        
-        choice = int(input("Enter the index of the checkpoint to load: (-1 for latest, -2 for from scratch) "))
-        if choice == -2:
-            print("Clearing all checkpoints")
-
-            for f in files:
-                os.remove(os.path.join(self.checkpoint_dir, f))
-            return None
-        elif choice == -1:
-            return int(files[-1].split('_')[1].split('.pth')[0])
-        elif 1 <= choice <= len(files):
-            return int(files[choice - 1].split('_')[1].split('.pth')[0])
         else:
-            raise ValueError("Invalid input. Please enter a valid number.")
+            latest_checkpoint = files[-1]
+            checkpoint_idx = int(latest_checkpoint.split('_')[1].split('.pth')[0])
+            if self.rank == 0:
+                print(f"Loading latest checkpoint: {latest_checkpoint}")
+            return checkpoint_idx
 
     def _load_checkpoint(self):
 
@@ -265,67 +259,69 @@ class Trainer:
 
             path = os.path.join(self.checkpoint_dir, f"Iteration_{checkpoint_idx}.pth")
 
-            checkpoint = torch.load(path)
-            self.model.load_state_dict(checkpoint["model_state_dict"])
+            map_location = {'cuda:%d' % 0: 'cuda:%d' % self.rank}
+            checkpoint = torch.load(path, map_location=map_location)
+            self.model.module.load_state_dict(checkpoint["model_state_dict"])
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             self.current_iter = checkpoint["current_iteration"]
             self.batch_idx = checkpoint["batch_idx"]
-            print(
-                f"Checkpoint loaded from {path} at iteration {self.current_iter}"
-            )
+            if self.rank == 0:
+                print(
+                    f"Checkpoint loaded from {path} at iteration {self.current_iter}"
+                )
         else:
-            print("Training from scratch")
+            if self.rank == 0:
+                print("Training from scratch")
 
 
     def train(self):
         self.model.train()
         while self.current_iter < self.max_iters:
             for idx, batch in enumerate(self.train_loader):
-                
-                if self.current_iter > self.max_iters:
+
+                if self.current_iter >= self.max_iters:
                     return
 
                 if self.current_iter % self.eval_every == 0:
                     # Evaluate Validation Loss
                     self.eval()
                     self.model.train()
-                
-                x = batch['input_ids'].to(self.gpu_id)
-                y = batch['target_ids'].to(self.gpu_id)
 
-                mask = batch['mask'].to(self.gpu_id)
-                
-                t0 = time.time()
+                x = batch['input_ids'].to(self.device)
+                y = batch['target_ids'].to(self.device)
+
+                mask = batch['mask'].to(self.device)
+
                 self.optimizer.zero_grad()
                 output = self.model(x)
                 loss = F.cross_entropy(output.view(-1, output.size(-1)), y.view(-1), reduction='none')
-                # print(loss.shape, mask.shape)
                 loss = (loss * mask.view(-1)).sum() / mask.sum()
 
-                # loss = F.cross_entropy(output.view(-1, output.size(-1)), y.view(-1))
                 loss.backward()
                 self.optimizer.step()
-                t1 = time.time()
+                self.scheduler.step()
 
                 self.current_iter += 1
                 if self.current_iter % self.save_every == 0:
                     self.batch_idx = idx
                     self._save_checkpoint()
 
-                if self.current_iter % 10 == 0:
-                    print(f"Iter: {self.current_iter:<12} | Loss: {loss.item():<10.6f} | Time: {t1 - t0:<8.6f}")
-                    wandb.log({"loss": loss.item(), "iteration": self.current_iter})
+                if self.current_iter % 10 == 0 and self.rank == 0:
+                    lr = self.scheduler.get_last_lr()[0]
+                    print(f"Iter: {self.current_iter:<12} | Loss: {loss.item():<10.6f} | LR: {lr:.6e}")
+                    wandb.log({"loss": loss.item(), "iteration": self.current_iter, "lr": lr})
     def eval(self):
         self.model.eval()
+        total_loss = torch.tensor(0.0).to(self.device)
+        count = torch.tensor(0).to(self.device)
 
         with torch.no_grad():
-            total_loss = 0
-            count = 0
             for batch in self.val_loader:
-                x = batch['input_ids'].to(self.gpu_id)
-                y = batch['target_ids'].to(self.gpu_id)
+                x = batch['input_ids'].to(self.device)
+                y = batch['target_ids'].to(self.device)
 
-                mask = batch['mask'].to(self.gpu_id)
+                mask = batch['mask'].to(self.device)
 
                 output = self.model(x)
                 loss = F.cross_entropy(output.view(-1, output.size(-1)), y.view(-1), reduction='none')
@@ -333,36 +329,83 @@ class Trainer:
 
                 total_loss += loss.item()
                 count += 1
-            
-            print(f"Validation Loss (Iteration {self.current_iter}): {total_loss / count} in {count} batches")
-            wandb.log({"val_loss": total_loss / count, "iteration": self.current_iter})
+
+        # Aggregate the total loss and count across all processes
+        torch.distributed.all_reduce(total_loss, op=torch.distributed.ReduceOp.SUM)
+        torch.distributed.all_reduce(count, op=torch.distributed.ReduceOp.SUM)
+
+        avg_loss = total_loss / count
+
+        if self.rank == 0:
+            print(f"Validation Loss (Iteration {self.current_iter}): {avg_loss.item()} in {count.item()} batches")
+            wandb.log({"val_loss": avg_loss.item(), "iteration": self.current_iter})
 
 
-def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+def main(rank, world_size):
+
+    ddp_setup(rank, world_size)
+
+    # Import training configuration
+    with open("config.yaml", "r") as file:
+        training_config = yaml.safe_load(file)
+
+    if rank == 0:
+        wandb.init(
+            project="DiffFormer",
+            config=training_config,
+        )
+
+    device = f"cuda:{rank}"
     print(f"Using device: {device}")
 
-    lr = training_config['learning_rate']
+    max_lr = training_config['max_learning_rate']
+    min_lr = training_config['min_learning_rate']
+    warmup_steps = training_config['warmup_steps']
+    max_iters = training_config['max_iters']
 
-    config = ToyTransConfig(is_diff=training_config['architecture'] == "DiffFormer")
-    model = TransModel(config)
+    # config = ToyTransConfig(is_diff=training_config['architecture'] == "DiffFormer")
+    config = LMConfig(**LM_ARGS["122M"], is_diff=training_config['architecture'] == "DiffFormer")
+    model = TransModel(config).to(device)
 
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    if rank == 0:
+        print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=max_lr)
+
+    # Define the learning rate scheduler with warmup
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        elif current_step < max_iters:
+            return max(
+                min_lr / max_lr,
+                (max_iters - current_step) / float(max(1, max_iters - warmup_steps)) * (1.0 - min_lr / max_lr) + min_lr / max_lr
+            )
+        else:
+            return min_lr / max_lr
+
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     trainer = Trainer(
         model=model,
         model_config=config,
         training_config=training_config,
         optimizer=optimizer,
-        gpu_id=None,
+        scheduler=scheduler,
+        device=device,
+        gpu_id=rank,
+        rank=rank,
+        world_size=world_size,
     )
 
     trainer.train()
 
-    wandb.finish()
+    if rank == 0:
+        wandb.finish()
+
+    destroy_process_group()
 
 if __name__ == "__main__":
-    main()
-    
-
+    world_size = torch.cuda.device_count()
+    torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size)

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 class ToyTransConfig:
     n_embed: int = 32
     n_head: int = 4
-    n_ctx: int = 16
+    n_ctx: int = 64
     n_layer: int = 4
     n_vocab: int = 100288
     is_diff: bool = False

@@ -165,6 +165,11 @@ class TransModel(nn.Module):
 
         self.config = config
 
+        if config.is_diff:
+            print("Using Differential Transformer")
+        else:
+            print("Using Vanilla Transformer")
+
         self.blocks = nn.ModuleList([Block(config, i+1) for i in range(config.n_layer)])
         self.wte = nn.Embedding(config.n_vocab, config.n_embed)  # Token embeddings
 

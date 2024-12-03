@@ -9,6 +9,7 @@ import numpy as np
 import time
 import os
 import wandb
+import yaml
 import sys
 from config import StableLMConfig, ToyTransConfig
 from datasets import load_dataset
@@ -17,16 +18,18 @@ from transformers import AutoTokenizer
 from models.model import TransModel
 from typing import Optional
 
-training_config = dict(
-    learning_rate=3e-3, 
-    architecture="DiffFormer",
-    dataset="HuggingFaceTB/smollm-corpus",
-    max_iters=400, 
-    batch_size=1,
-    save_every=100,
-    eval_every=100,
-)
+# training_config = dict(
+#     learning_rate=3e-3, 
+#     architecture="DiffFormer",
+#     dataset="HuggingFaceTB/smollm-corpus",
+#     max_iters=400, 
+#     batch_size=1,
+#     save_every=100,
+#     eval_every=100,
+# )
 
+with open("config.yaml", "r") as file:
+    training_config = yaml.safe_load(file)
 
 wandb.init(
     project="DiffFormer",
@@ -171,6 +174,7 @@ class Trainer:
             self.model = DDP(model, device_ids=[gpu_id])
 
         self.model_config = model_config
+        self.training_config = training_config
         self.train_loader = self.val_loader = None
         self.optimizer = optimizer
         self.gpu_id = gpu_id if gpu_id is not None else 'cpu'
@@ -207,6 +211,7 @@ class Trainer:
             batch_size,
             "HuggingFaceTB/SmolLM-135M",
             n_ctx,
+            num_val_samples=self.training_config['num_val_samples'],
             train_skip_samples=train_skip_samples
         )
 
@@ -290,7 +295,7 @@ class Trainer:
 
                 mask = batch['mask'].to(self.gpu_id)
                 
-
+                t0 = time.time()
                 self.optimizer.zero_grad()
                 output = self.model(x)
                 loss = F.cross_entropy(output.view(-1, output.size(-1)), y.view(-1), reduction='none')
@@ -300,6 +305,7 @@ class Trainer:
                 # loss = F.cross_entropy(output.view(-1, output.size(-1)), y.view(-1))
                 loss.backward()
                 self.optimizer.step()
+                t1 = time.time()
 
                 self.current_iter += 1
                 if self.current_iter % self.save_every == 0:
@@ -307,7 +313,7 @@ class Trainer:
                     self._save_checkpoint()
 
                 if self.current_iter % 10 == 0:
-                    print(f"Iter: {self.current_iter}, Loss: {loss.item()}")
+                    print(f"Iter: {self.current_iter:<12} | Loss: {loss.item():<10.6f} | Time: {t1 - t0:<8.6f}")
                     wandb.log({"loss": loss.item(), "iteration": self.current_iter})
     def eval(self):
         self.model.eval()
@@ -338,8 +344,10 @@ def main():
 
     lr = training_config['learning_rate']
 
-    config = ToyTransConfig(is_diff=True)
+    config = ToyTransConfig(is_diff=training_config['architecture'] == "DiffFormer")
     model = TransModel(config)
+
+    print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     trainer = Trainer(

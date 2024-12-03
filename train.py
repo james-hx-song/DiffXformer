@@ -11,7 +11,7 @@ import os
 import wandb
 import yaml
 import sys
-from config import StableLMConfig, ToyTransConfig
+from config import ToyTransConfig, LM_ARGS, LMConfig
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
@@ -344,7 +344,8 @@ def main():
 
     lr = training_config['learning_rate']
 
-    config = ToyTransConfig(is_diff=training_config['architecture'] == "DiffFormer")
+    # config = ToyTransConfig(is_diff=training_config['architecture'] == "DiffFormer")
+    config = LMConfig(**LM_ARGS["122M"], is_diff=training_config['architecture'] == "DiffFormer")
     model = TransModel(config)
 
     print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")

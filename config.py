@@ -4,9 +4,9 @@ from dataclasses import dataclass
 class ToyTransConfig:
     n_embed: int = 32
     n_head: int = 4
-    n_ctx: int = 16
+    n_ctx: int = 64
     n_layer: int = 4
-    n_vocab: int = 100288
+    n_vocab: int = 49152
     is_diff: bool = False
 
 @dataclass
@@ -17,6 +17,21 @@ class StableLMConfig:
     n_ctx: int = 4096
     n_vocab: int = 100288
     is_diff: bool = False
+
+@dataclass
+class LMConfig:
+    n_embed: int = 768
+    n_head: int = 12
+    n_layer: int = 24
+    n_ctx: int = 4096
+    n_vocab: int = 49152 # Tokenizer we are using 
+    is_diff: bool = True
+
+LM_ARGS = {
+    "122M": dict(n_embed=768, n_layer=12, n_head=12),
+    "204M": dict(n_embed=960, n_layer=20, n_head=12),   
+    "312M": dict(n_embed=960, n_layer=24, n_head=12),
+}
 
 CONFIG_ARGS = {
     "830M": dict(n_embed=1536, n_layer=24, n_head=8),

@@ -4,7 +4,8 @@ from transformers import AutoTokenizer
 import torch.nn.functional as F
 import LM
 
-class MyCustomLM(LM):
+@register_model("TransformerWrapper")
+class TransformerWrapper(LM):
     #...
     def __init__(self, model:TransModel, tokenizer_name):
         self.model = model

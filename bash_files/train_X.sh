@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=1 python3 train.py --config config_vanilla.yaml > logs/Xformer.txt 2>&1

@@ -11,7 +11,7 @@ import os
 import wandb
 import yaml
 import sys
-from config import ToyTransConfig, LM_ARGS, LMConfig
+from configs.config import ToyTransConfig, LM_ARGS, LMConfig
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
@@ -342,16 +342,26 @@ class Trainer:
 
 
 def main(rank, world_size):
+    
+        
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config.yaml")
+    parser.add_argument("--size", type=str, default="122M")
+    
+    
+    args = parser.parse_args()
 
     ddp_setup(rank, world_size)
 
     # Import training configuration
-    with open("config.yaml", "r") as file:
+    with open(args.config, "r") as file:
         training_config = yaml.safe_load(file)
 
     if rank == 0:
         wandb.init(
-            project="DiffFormer",
+            project=training_config['architecture'],
             config=training_config,
         )
 
@@ -364,7 +374,7 @@ def main(rank, world_size):
     max_iters = training_config['max_iters']
 
     # config = ToyTransConfig(is_diff=training_config['architecture'] == "DiffFormer")
-    config = LMConfig(**LM_ARGS["122M"], is_diff=training_config['architecture'] == "DiffFormer")
+    config = LMConfig(**LM_ARGS[args.size], is_diff=training_config['architecture'] == "DiffFormer")
     model = TransModel(config).to(device)
 
     if rank == 0:

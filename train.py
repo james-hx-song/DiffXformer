@@ -17,6 +17,7 @@ from transformers import AutoTokenizer
 
 from models.model import TransModel
 from typing import Optional
+from tqdm import tqdm
 
 
 # training_config = dict(
@@ -208,7 +209,7 @@ class Trainer:
         with torch.no_grad():
             total_loss = 0
             count = 0
-            for batch in self.val_loader:
+            for batch in tqdm(self.val_loader):
                 x = batch['input_ids'].to(self.gpu_id)
                 y = batch['target_ids'].to(self.gpu_id)
 

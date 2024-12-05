@@ -3,10 +3,10 @@ min_learning_rate: 5.12e-6
 warmup_steps: 1000
 architecture: TransFormer
 dataset: MSMARCO
-max_iters: 40000
+max_iters: 200000
 batch_size: 16
-save_every: 4000
-eval_every: 4000
+save_every: 40000
+eval_every: 40000
 size: 17M
 pretrain: True
 train_file: third_party/MSMARCO/train_v2.1.json

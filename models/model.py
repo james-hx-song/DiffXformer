@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import torchtune as tt
 import math
 
+from typing import Optional, Tuple
+
 
 def lambda_init(layer):
     return 0.8 - 0.6 * math.exp(-0.3 * (layer - 1))
@@ -179,7 +181,7 @@ class TransModel(nn.Module):
         self.lm_head.weight = self.wte.weight
 
     def forward(self, x):
-        assert x.size(1) <= self.config.n_ctx, "Context length exceeds model's maximum context length"
+        assert x.size(1) <= self.config.n_ctx, f"Context length {x.size(1)} exceeds model's maximum context length {self.config.n_ctx}"
         x = self.wte(x)
 
         for block in self.blocks:
@@ -187,6 +189,46 @@ class TransModel(nn.Module):
 
         logits = self.lm_head(x)
         return logits
+    
+    def generate(self, x: torch.Tensor, max_new_tokens: Optional[int] = None, num_copies: int= 1, temperature: float = 1.0, top_k: Optional[int] = None, device: str = "cuda"):
+        """
+        Take a conditioning sequence of indices x and generate max_new_tokens tokens.
+
+        args:
+            x: torch.Tensor, shape (T, )
+            max_new_tokens: int
+            num_copies: int
+            temperature: float
+            top_k: int
+        """
+        self.eval()
+
+        if max_new_tokens is None:
+            max_new_tokens = self.config.n_ctx
+
+        x = x.unsqueeze(0).repeat(num_copies, 1)
+        x = x.to(device)
+
+        while x.shape[1] < max_new_tokens:
+            with torch.no_grad():
+                logits = self(x)
+
+            logits = logits[:, -1, :] / temperature
+
+            probs = F.softmax(logits, dim=-1)
+
+            if top_k is not None:
+
+                topk_probs, topk_idx = torch.topk(probs, top_k, dim=-1)
+                idx = torch.multinomial(topk_probs, num_samples=1)
+                xcol = torch.gather(topk_idx, 1, idx)
+                x = torch.cat((x, xcol), dim=1)
+
+            else:
+                idx = torch.multinomial(probs, num_samples=1)
+                x = torch.cat((x, idx), dim=1)
+
+        return x
 
 
 if __name__ == "__main__":
@@ -200,9 +242,13 @@ if __name__ == "__main__":
     # model = DifferentialTransformer(StableLMConfig())
     # print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     # model = TransModel(StableLMConfig(**CONFIG_ARGS["830M"]))
-    model = TransModel(LMConfig(**LM_ARGS["204M"]))
+    model = TransModel(ToyTransConfig())
 
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    x = torch.randint(0, 100, (16,))
+    output = model.generate(x, None, num_copies=10, temperature=1.0, top_k=50, device='cpu')
+    print(output.shape)
+
+    # print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     # x = torch.randint(0, 100, (1, 16))
     # print(x.shape)
     # output = model(x)

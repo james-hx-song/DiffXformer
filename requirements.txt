@@ -1,5 +1,8 @@
 torch==2.5.0
+torchtune==0.4.0
+torchao==0.6.1
 numpy==2.1.2
-tiktoken==0.8.0
 transformers==4.46.3
+datasets==3.1.0
+wandb==0.18.7
 lm-eval

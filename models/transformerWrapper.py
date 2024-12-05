@@ -8,10 +8,12 @@ from lm_eval.api.instance import Instance
 from lm_eval.api.registry import register_model
 
 
-@register_model("TransformerWrapper")
+# @register_model("TransformerWrapper")
 class TransformerWrapper(LM):
     #...
     def __init__(self, model:TransModel, tokenizer_name):
+
+        super().__init__()
         self.model = model
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 

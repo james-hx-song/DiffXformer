@@ -7,11 +7,11 @@ import lm_eval
 import torch
 import json
 
-import ssl
-import certifi
+# import ssl
+# import certifi
 
-# Add this line before any HTTPS requests
-ssl._create_default_https_context = ssl._create_unverified_context
+# # Add this line before any HTTPS requests
+# ssl._create_default_https_context = ssl._create_unverified_context
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 

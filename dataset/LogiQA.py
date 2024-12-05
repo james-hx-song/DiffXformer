@@ -12,30 +12,33 @@ def load_data_from_file(file_path):
     Each example is a dictionary with 'text' and 'label' keys.
     """
     examples = []
+
     with open(file_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
 
     current_example = {}
     current_text = ''
+    ans = ''
 
     for line in lines:
         line = line.strip()
         if len(line) == 1 and line.lower() in ['a', 'b', 'c', 'd']:
-            # Start of a new example
-            if current_example:
-                # Save the previous example
-                current_example['text'] = current_text.strip()
+            # Save the previous example if it exists
+            if current_text and ans:
+                current_example['text'] = f"{current_text.strip()} {ans.strip()}"
                 examples.append(current_example)
+            
             # Start a new example
-            current_example = {'label': line}
+            current_example = {}
             current_text = ''
+            ans = f"Answer: {line.lower()}"
         else:
             current_text += line + ' '
-    # Add the last example
-    if current_example:
-        current_example['text'] = current_text.strip()
-        examples.append(current_example)
 
+    # Add the last example if it exists
+    if current_text and ans:
+        current_example['text'] = f"{current_text.strip()} {ans.strip()}"
+        examples.append(current_example)
     return examples
 
 # --------- Dataset Loading Function --------- #
@@ -136,17 +139,17 @@ def load_dataloader(
 
     ds_train = ds_train.map(
         tokenize,
-        remove_columns=['text', 'label']
+        remove_columns=['text']
     )
 
     ds_val = ds_val.map(
         tokenize,
-        remove_columns=['text', 'label']
+        remove_columns=['text']
     )
     
     ds_test = ds_test.map(
         tokenize,
-        remove_columns=['text', 'label']
+        remove_columns=['text']
     )
 
     def collate_fn(batch):

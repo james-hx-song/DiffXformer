@@ -23,11 +23,12 @@ class LMConfig:
     n_embed: int = 768
     n_head: int = 12
     n_layer: int = 24
-    n_ctx: int = 4096
+    n_ctx: int = 1024
     n_vocab: int = 49152 # Tokenizer we are using 
     is_diff: bool = True
-
+    
 LM_ARGS = {
+    "17M": dict(n_embed=256, n_layer=6, n_head=4, n_ctx=512),
     "122M": dict(n_embed=768, n_layer=12, n_head=12),
     "204M": dict(n_embed=960, n_layer=20, n_head=12),   
     "312M": dict(n_embed=960, n_layer=24, n_head=12),

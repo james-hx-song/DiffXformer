@@ -2,3 +2,4 @@ torch==2.5.0
 numpy==2.1.2
 tiktoken==0.8.0
 transformers==4.46.3
+lm-eval

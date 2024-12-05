@@ -190,7 +190,7 @@ class TransModel(nn.Module):
 
 
 if __name__ == "__main__":
-    from config import LMConfig, ToyTransConfig, LM_ARGS
+    from configs.config import LMConfig, ToyTransConfig, LM_ARGS
 
     # config = ToyTransConfig()
     # model = MultiHeadDiffAttention(config, 1)

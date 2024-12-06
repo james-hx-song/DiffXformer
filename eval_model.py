@@ -1,7 +1,7 @@
 from transformers import AutoTokenizer
 from models.model import TransModel
 from models.transformerWrapper import TransformerWrapper
-from config import StableLMConfig, ToyTransConfig
+from configs.config import LMConfig, ToyTransConfig, LM_ARGS
 from lm_eval.api.instance import Instance
 import lm_eval
 import torch
@@ -12,18 +12,28 @@ import json
 
 # # Add this line before any HTTPS requests
 # ssl._create_default_https_context = ssl._create_unverified_context
+task = "openbookqa"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+is_diff = True
 
 print("Starting")
-n_ctx=64
-config = ToyTransConfig(n_ctx=n_ctx)
+
+config = LMConfig(**LM_ARGS["122M"], is_diff=is_diff)
+
+name = "DiffFormer" if is_diff else "Transformer"
+
 model = TransModel(config)
+checkpoint = torch.load(f"checkpoints/{name}/Iteration_40000.pth", map_location=device)
+
+model.load_state_dict(checkpoint["model_state_dict"])
 print("Model ready")
+
+
 tokenizer_name = "HuggingFaceTB/SmolLM-135M"
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-wrapper = TransformerWrapper(model, tokenizer_name)
+wrapper = TransformerWrapper(model, tokenizer_name, device)
 
 # requests = [("context1", "continuation1"), ("context2", "continuation2")]
 # requests = [Instance("loglikelihood", {}, ( "context1", "continuation1"), 0), Instance("loglikelihood", {},( "context1", "continuation1"), 1)]
@@ -42,11 +52,11 @@ task_manager = lm_eval.tasks.TaskManager()
 
 results = lm_eval.simple_evaluate(
     model=wrapper,
-    tasks=["hellaswag"],
+    tasks=[task],
     num_fewshot=0,
     task_manager=task_manager, 
     device=device
 )
 
-with open('results.json', 'w') as f:
+with open(f'{task}_results.json', 'w') as f:
     json.dump(results, f, indent=4)

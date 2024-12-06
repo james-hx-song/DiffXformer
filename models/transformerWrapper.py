@@ -7,20 +7,24 @@ from lm_eval.api.model import LM
 from lm_eval.api.instance import Instance
 from lm_eval.api.registry import register_model
 
+from tqdm import tqdm
+
 
 # @register_model("TransformerWrapper")
 class TransformerWrapper(LM):
     #...
-    def __init__(self, model:TransModel, tokenizer_name):
+    def __init__(self, model:TransModel, tokenizer_name, device):
 
         super().__init__()
-        self.model = model
+        self.model = model.to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-
+        self.device = device
     def loglikelihood(self, requests: list[Instance]) -> list[tuple[float, bool]]:
+        self.model.eval()
         #...
         toret = []
-        for request in requests:
+
+        for request in tqdm(requests):
             log_probability = 0
             input, expected_output = request.args
             input = self.tokenizer(input, return_tensors="pt")['input_ids']
@@ -28,14 +32,16 @@ class TransformerWrapper(LM):
             # print(expected_output.numpy())
             log_softmax = nn.LogSoftmax(dim = 1)
             model_input = torch.cat((input, expected_output), dim = 1) # self.tokenizer.convert_ids_to_tokens(
+
+            model_input = model_input.to(self.device)
             results = self.model.forward(model_input)
 
             output_logits = log_softmax(results)
-            print(output_logits.shape)
+            # print(output_logits.shape)
             is_greedy = True
             for index, expected_token in enumerate(expected_output[0][:]):
                 # Find probability that expected_token would be chosen from output_logits
-                print(expected_token.numpy())
+                # print(expected_token.numpy())
                 token_id = expected_token #self.tokenizer.convert_tokens_to_ids(expected_token)
                 # for x in range(output_logits.shape[2]):
                 #     log_probability += output_logits[0][index+input.shape[0]][x].item()
@@ -52,7 +58,7 @@ class TransformerWrapper(LM):
 
     def loglikelihood_rolling(self, requests: list[Instance]) -> list[tuple[float, bool]]:
         toret = []
-        for request in requests:
+        for request in tqdm(requests):
             log_probability = 0
             input, expected_output = request.args
             input = self.tokenizer(input, return_tensors="pt")['input_ids']
@@ -63,10 +69,10 @@ class TransformerWrapper(LM):
             results = self.model.forward(torch.cat((input, expected_output), dim = 1))
 
             output_logits = log_softmax(results)
-            print(output_logits.shape)
+            # print(output_logits.shape)
             is_greedy = True
             for index, expected_token in enumerate(input[0][1:]):
-                print(expected_token.numpy())
+                # print(expected_token.numpy())
                 token_id = expected_token #self.tokenizer.convert_tokens_to_ids(expected_token)
                 log_probability += output_logits[0][index-1][token_id].item()
                 if is_greedy:
@@ -88,14 +94,14 @@ class TransformerWrapper(LM):
 
     def generate_until(self, requests: list[Instance]) -> list[str]:
         toret = []
-        for request in requests:
+        for request in tqdm(requests):
             input, gen_controls = request.args
             keep_generating = True
             generated_tokens = self.tokenizer(input, return_tensors="pt")['input_ids'].flatten().tolist()
             while keep_generating:
-                print(generated_tokens)
+                # print(generated_tokens)
                 generated_token_text = self.tokenizer.convert_ids_to_tokens(generated_tokens)
-                print(generated_token_text)
+                # print(generated_token_text)
                 # If we have exceeded max gen tokens
                 if len(generated_tokens) >= gen_controls.get("max_gen_toks", 100):
                     keep_generating = False

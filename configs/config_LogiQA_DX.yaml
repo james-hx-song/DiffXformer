@@ -1,0 +1,16 @@
+max_learning_rate: 1.28e-4
+min_learning_rate: 5.12e-6
+warmup_steps: 1000
+architecture: DiffFormer
+dataset: LogiQA
+max_iters: 40000
+batch_size: 16
+save_every: 4000
+eval_every: 4000
+size: 17M
+pretrain: True
+train_file: third_party/LogiQA-dataset/Train.txt
+val_file: third_party/LogiQA-dataset/Eval.txt
+test_file: third_party/LogiQA-dataset/Test.txt
+work_dir: DiffFormer_LogiQA
+tokenizer_name: "HuggingFaceTB/SmolLM-135M"

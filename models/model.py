@@ -165,6 +165,11 @@ class TransModel(nn.Module):
 
         self.config = config
 
+        if config.is_diff:
+            print("Using Differential Transformer")
+        else:
+            print("Using Vanilla Transformer")
+
         self.blocks = nn.ModuleList([Block(config, i+1) for i in range(config.n_layer)])
         self.wte = nn.Embedding(config.n_vocab, config.n_embed)  # Token embeddings
 
@@ -185,7 +190,7 @@ class TransModel(nn.Module):
 
 
 if __name__ == "__main__":
-    from config import StableLMConfig, CONFIG_ARGS
+    from configs.config import LMConfig, ToyTransConfig, LM_ARGS
 
     # config = ToyTransConfig()
     # model = MultiHeadDiffAttention(config, 1)
@@ -194,8 +199,11 @@ if __name__ == "__main__":
     # output = model(x)
     # model = DifferentialTransformer(StableLMConfig())
     # print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    model = TransModel(StableLMConfig(**CONFIG_ARGS["830M"]))
-    x = torch.randint(0, 100, (1, 16))
-    print(x.shape)
-    output = model(x)
-    print(output.shape)
+    # model = TransModel(StableLMConfig(**CONFIG_ARGS["830M"]))
+    model = TransModel(LMConfig(**LM_ARGS["204M"]))
+
+    print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    # x = torch.randint(0, 100, (1, 16))
+    # print(x.shape)
+    # output = model(x)
+    # print(output.shape)

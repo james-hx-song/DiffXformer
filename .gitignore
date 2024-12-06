@@ -164,3 +164,7 @@ cython_debug/
 !requirements.txt
 *.npy
 .DS_Store
+wandb/
+checkpoints/
+
+third_party/

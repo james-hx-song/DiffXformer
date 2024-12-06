@@ -55,8 +55,8 @@ results = lm_eval.simple_evaluate(
     tasks=[task],
     num_fewshot=0,
     task_manager=task_manager, 
-    device=device
+    device=device,
 )
 
-with open(f'{task}_results.json', 'w') as f:
+with open(f'{task}_{name}_results.json', 'w') as f:
     json.dump(results, f, indent=4)

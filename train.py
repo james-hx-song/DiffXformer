@@ -20,17 +20,6 @@ from typing import Optional
 from tqdm import tqdm
 
 
-# training_config = dict(
-#     learning_rate=3e-3, 
-#     architecture="DiffFormer",
-#     dataset="HuggingFaceTB/smollm-corpus",
-#     max_iters=400, 
-#     batch_size=1,
-#     save_every=100,
-#     eval_every=100,
-# )
-
-
 class Trainer:
     def __init__(
         self,
@@ -203,6 +192,54 @@ class Trainer:
                     print(f"Iter: {self.current_iter:<12} | Loss: {loss.item():<10.6f} | Time: {t1 - t0:<8.6f} | LR: {lr:.6e}")
                     wandb.log({"loss": loss.item(), "iteration": self.current_iter})
                     
+    def fine_tuning(self):
+        """
+        For fine-tuning the model. Instead of prediciting the next token, we predict answer only.
+        """
+        self.model.train()
+        epoch = 0
+        while self.current_iter < self.max_iters:
+            epoch += 1
+            print(f"Epoch: {epoch}")
+            
+            for idx, batch in enumerate(self.train_loader):
+                
+                if self.current_iter > self.max_iters:
+                    return
+
+                if self.current_iter % self.eval_every == 0 and self.current_iter > 0:
+                    # Evaluate Validation Loss
+                    self.eval()
+                    self.model.train()
+                
+                x = batch['input_ids'].to(self.gpu_id)
+                y = batch['target_ids'].to(self.gpu_id)
+                answer_mask = batch['answer_mask'].to(self.gpu_id)
+                mask = batch['mask'].to(self.gpu_id)
+                
+                t0 = time.time()
+                self.optimizer.zero_grad()
+                output = self.model(x)
+                loss = F.cross_entropy(output.view(-1, output.size(-1)), y.view(-1), reduction='none')
+                # print(loss.shape, mask.shape)
+                loss = (loss * mask.view(-1) * answer_mask.view(-1)).sum() / (mask * answer_mask).sum()
+
+                # loss = F.cross_entropy(output.view(-1, output.size(-1)), y.view(-1))
+                loss.backward()
+                self.optimizer.step()
+                self.scheduler.step()
+                t1 = time.time()
+
+                self.current_iter += 1
+                if self.current_iter % self.save_every == 0:
+                    self.batch_idx = idx
+                    self._save_checkpoint()
+
+                if self.current_iter % 10 == 0:
+                    lr = self.scheduler.get_last_lr()[0]
+                    print(f"Iter: {self.current_iter:<12} | Loss: {loss.item():<10.6f} | Time: {t1 - t0:<8.6f} | LR: {lr:.6e}")
+                    wandb.log({"loss": loss.item(), "iteration": self.current_iter})
+                    
     def eval(self):
         self.model.eval()
 
@@ -224,14 +261,14 @@ class Trainer:
             
             print(f"Validation Loss (Iteration {self.current_iter}): {total_loss / count} in {count} batches")
             wandb.log({"val_loss": total_loss / count, "iteration": self.current_iter})
-
-
+            
 def main():
     
     import argparse
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
+    parser.add_argument("--fine_tuning", action="store_true")
     
     args = parser.parse_args()
     
@@ -252,7 +289,7 @@ def main():
         raise ValueError("Invalid dataset")
         
     args.load_weight_only = training_config.get("pretrain", False)
-    args.checkpoint_path = training_config['work_dir'] if training_config['work_dir'] else None
+    args.checkpoint_path = training_config['work_dir'] if training_config.get('work_dir') else None
     
 
 
@@ -301,12 +338,20 @@ def main():
         gpu_id=device,
         args=args
     )
-
-    trainer.train()
+    
+    if args.fine_tuning:
+        trainer.fine_tuning()
+    else:
+        trainer.train()
 
     wandb.finish()
 
 if __name__ == "__main__":
     main()
+    
+    # from sentence_transformers import SentenceTransformer
+    # tokenizer = AutoTokenizer.from_pretrained(training_config["tokenizer_name"])  # or your model tokenizer
+    # sim_model = SentenceTransformer("all-MiniLM-L6-v2")
+    
     
 

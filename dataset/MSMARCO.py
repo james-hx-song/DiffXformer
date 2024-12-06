@@ -36,11 +36,28 @@ class CustomJSONDataset(Dataset):
             if p['is_selected'] == 1:
                 text += f"Passage {passage_idx}: {p['passage_text']} "
                 passage_idx += 1
-        
-        text += f"Query: {self.query[key]} Answer: {self.ans[key]}"
+        query = text + f"Query: {self.query[key]} Answer:"
+        text += f"Query: {self.query[key]} Answer:{self.ans[key][0]}"
+        answer = self.ans[key][0]
         # Tokenize the text
         tokenized = self.tokenizer(
             text,
+            add_special_tokens=True,
+            return_tensors='pt',
+            padding=False,
+            truncation=False
+        )
+        
+        tokenized_query = self.tokenizer(
+            query,
+            add_special_tokens=True,
+            return_tensors='pt',
+            padding=False,
+            truncation=False
+        )
+        
+        tokenized_answer = self.tokenizer(
+            answer,
             add_special_tokens=True,
             return_tensors='pt',
             padding=False,
@@ -77,14 +94,32 @@ class CustomJSONDataset(Dataset):
         target_ids = reshaped_input_ids[:, 1:]
 
         mask = reshaped_attention_mask[:, 1:]
+        
+        if answer == 'No Answer Present.':
+            mask = torch.zeros_like(mask)
 
         assert input_ids.shape[1] == self.n_ctx, f"Input shape: {input_ids.shape}"
         assert target_ids.shape[1] == self.n_ctx, f"Target shape: {target_ids.shape}"
 
+        # Compute lengths of query and answer
+        len_query = tokenized_query['input_ids'].shape[1]
+        len_answer = tokenized_answer['input_ids'].shape[1]
+
+        answer_mask = torch.zeros_like(mask)
+        answer_start = len_query - 1
+        answer_end = answer_start + len_answer
+        # Ensure indexing doesn't go beyond the sequence length
+        answer_end = min(answer_end, answer_mask.size(1))
+        if answer_start < answer_mask.size(1):
+            answer_mask[:, answer_start:answer_end] = 1
+            
         return {
             'input_ids': input_ids,
             'mask': mask,
-            'target_ids': target_ids
+            'target_ids': target_ids,
+            'query': tokenized_query['input_ids'],
+            'answer': tokenized_answer['input_ids'],
+            'answer_mask': answer_mask
         }
 
 # --------- DataLoader Function --------- #
@@ -119,21 +154,38 @@ def load_dataloader(
         input_ids = []
         masks = []
         target_ids = []
+        query = []
+        answer = []
+        answer_mask = []
 
         for item in batch:
             input_ids.append(item['input_ids'])
             masks.append(item['mask'])
             target_ids.append(item['target_ids'])
+            query.append(item['query'])
+            answer.append(item['answer'])
+            answer_mask.append(item['answer_mask'])
 
         # Concatenate along batch dimension
         input_ids = torch.cat(input_ids, dim=0)
         masks = torch.cat(masks, dim=0)
         target_ids = torch.cat(target_ids, dim=0)
+        query = torch.cat(query, dim=0)
+        answer = torch.cat(answer, dim=0)
+        answer_mask = torch.cat(answer_mask, dim=0)
+        
 
-        return {'input_ids': input_ids, 'mask': masks, 'target_ids': target_ids}
+        return {'input_ids': input_ids, 'mask': masks, 'target_ids': target_ids, 
+                'query': query, 'answer': answer,
+                'answer_mask': answer_mask
+                }
 
-    ds_train_loader = DataLoader(ds_train, batch_size=batch_size, num_workers=8, collate_fn=collate_fn)
-    ds_val_loader = DataLoader(ds_val, batch_size=batch_size, num_workers=8, collate_fn=collate_fn)
+    ds_train_loader = DataLoader(ds_train, batch_size=batch_size, 
+                                 num_workers=16,
+                                 collate_fn=collate_fn)
+    ds_val_loader = DataLoader(ds_val, batch_size=batch_size, 
+                               num_workers=16,
+                               collate_fn=collate_fn)
     # ds_test_loader = DataLoader(ds_test, batch_size=batch_size, collate_fn=collate_fn)
 
     return ds_train_loader, ds_val_loader, None
@@ -161,3 +213,5 @@ if __name__ == '__main__':
         print("Mask shape:", batch['mask'].shape)
         print("Target IDs shape:", batch['target_ids'].shape)
         break
+    
+    

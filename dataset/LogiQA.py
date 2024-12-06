@@ -25,19 +25,23 @@ def load_data_from_file(file_path):
         if len(line) == 1 and line.lower() in ['a', 'b', 'c', 'd']:
             # Save the previous example if it exists
             if current_text and ans:
-                current_example['text'] = f"{current_text.strip()} {ans.strip()}"
+                current_example['text'] = f"{current_text.strip()}. {ans.strip()}"
+                current_example['query'] = f"{current_text.strip()}. {ans.strip()[:-1]}"
+                current_example['answer'] = ans.strip()[-1]
                 examples.append(current_example)
             
             # Start a new example
             current_example = {}
             current_text = ''
-            ans = f"Answer: {line.lower()}"
+            ans = f"Answer:{line.upper()}"
         else:
             current_text += line + ' '
 
     # Add the last example if it exists
     if current_text and ans:
         current_example['text'] = f"{current_text.strip()} {ans.strip()}"
+        current_example['query'] = f"{current_text.strip()} {ans.strip()[:-1]}"
+        current_example['answer'] = ans.strip()[-1]
         examples.append(current_example)
     return examples
 
@@ -96,6 +100,23 @@ def load_dataloader(
             padding=False,
             truncation=False
         )
+        
+        tokenized_query = tokenizer(
+            example['query'],
+            add_special_tokens=True,
+            return_tensors='pt',
+            padding=False,
+            truncation=False
+        )
+
+        tokenized_answer = tokenizer(
+            example['answer'],
+            add_special_tokens=True,
+            return_tensors='pt',
+            padding=False,
+            truncation=False
+        )
+
 
         max_len = n_ctx + 1
 
@@ -130,26 +151,38 @@ def load_dataloader(
 
         assert input.shape[1] == n_ctx, f"Input shape: {input.shape}"
         assert target.shape[1] == n_ctx, f"Target shape: {target.shape}"
-
+        
+        len_query = tokenized_query['input_ids'].shape[1]
+        len_answer = tokenized_answer['input_ids'].shape[1]
+        answer_mask = torch.zeros_like(mask)
+        answer_start = len_query - 1
+        answer_end = answer_start + len_answer
+        # Ensure indexing doesn't go beyond the sequence length
+        answer_end = min(answer_end, answer_mask.size(1))
+        if answer_start < answer_mask.size(1):
+            answer_mask[:, answer_start:answer_end] = 1
         return {
             'input_ids': input,
             'mask': mask,
-            'target_ids': target
+            'target_ids': target,
+            'query': tokenized_query['input_ids'],
+            'answer': tokenized_answer['input_ids'],
+            'answer_mask': answer_mask
         }
 
     ds_train = ds_train.map(
         tokenize,
-        remove_columns=['text']
+        remove_columns=['text','query','answer']
     )
 
     ds_val = ds_val.map(
         tokenize,
-        remove_columns=['text']
+        remove_columns=['text','query','answer']
     )
     
     ds_test = ds_test.map(
         tokenize,
-        remove_columns=['text']
+        remove_columns=['text','query','answer']
     )
 
     def collate_fn(batch):
@@ -160,7 +193,13 @@ def load_dataloader(
         input_ids = torch.cat([torch.tensor(item['input_ids']) for item in batch], dim=0)
         masks = torch.cat([torch.tensor(item['mask']) for item in batch], dim=0)
         target_ids = torch.cat([torch.tensor(item['target_ids']) for item in batch], dim=0)
-        return {'input_ids': input_ids, 'mask': masks, 'target_ids': target_ids}
+        query = torch.cat([torch.tensor(item['query']) for item in batch], dim=0)
+        answer = torch.cat([torch.tensor(item['answer']) for item in batch], dim=0)
+        answer_mask = torch.cat([torch.tensor(item['answer_mask']) for item in batch], dim=0)
+        return {'input_ids': input_ids, 'mask': masks, 'target_ids': target_ids, 
+                'query': query, 'answer': answer,
+                'answer_mask': answer_mask
+                }
     
     ds_train_loader = DataLoader(ds_train, batch_size=batch_size, collate_fn=collate_fn)
     ds_val_loader = DataLoader(ds_val, batch_size=batch_size, collate_fn=collate_fn)

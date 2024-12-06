@@ -30,6 +30,12 @@ def load_dataloader(
         split="train",
         streaming=True,
     )
+    
+    try:
+        print(ds.info)
+        print(f"Number of examples: {ds.info.splits['train'].num_examples}")
+    except AttributeError:
+        print("Dataset info is not available in streaming mode.")
 
     print(f"Splitting dataset into {num_val_samples} validation samples, skipping {train_skip_samples} training samples")
     ds_val = ds.take(num_val_samples)

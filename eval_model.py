@@ -12,10 +12,10 @@ import json
 
 # # Add this line before any HTTPS requests
 # ssl._create_default_https_context = ssl._create_unverified_context
-task = "openbookqa"
+task = "arc_challenge"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-is_diff = True
+is_diff = False
 
 print("Starting")
 
@@ -56,7 +56,8 @@ results = lm_eval.simple_evaluate(
     num_fewshot=0,
     task_manager=task_manager, 
     device=device,
+    cache_requests=True
 )
 
-with open(f'{task}_{name}_results.json', 'w') as f:
+with open(f'{task}_{name}_results_2.json', 'w') as f:
     json.dump(results, f, indent=4)

@@ -168,3 +168,5 @@ wandb/
 checkpoints/
 
 third_party/
+
+*.pth

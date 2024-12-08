@@ -18,6 +18,8 @@ from typing import Optional, Iterator
 
 import matplotlib.pyplot as plt
 
+import json
+
 # ----------------------------
 # New Dataset and Model Setup
 # ----------------------------
@@ -50,26 +52,29 @@ class PhiMLP(nn.Module):
 
 def sample_x(n_examples, d_dim, device):
     # Shape: (n_examples+1, d_dim)
-    return torch.rand(n_examples + 1, d_dim, device=device)
+    return torch.rand(n_examples, d_dim, device=device)
 
 
 def sample_z(n_examples, device):
     # noise sample from N(0,1)
-    return F.leaky_relu(torch.randn(n_examples + 1, device=device))
+    return torch.randn(n_examples, device=device) * 0.1
 
 
 @torch.no_grad()
-def compute_y(x, z, phi_mlp, tau, hidden_d_dim):
+def compute_y(x, z, phi_mlp, tau, hidden_d_dim, is_eval=False):
     # w ~ N(0, tau^2)
     w = torch.randn(hidden_d_dim, device=x.device) * (tau**2)
     phi_x = phi_mlp(x)  # Shape: (n_examples+1, hidden_d_dim)
     dot_product = torch.matmul(phi_x, w)  # Shape: (n_examples+1,)
-    y = dot_product + z  # Shape: (n_examples+1,)
+    if not is_eval:
+        y = dot_product + z  # Shape: (n_examples+1,)
+    else:
+        y = dot_product  # Shape: (n_examples+1,)
     return y
 
 
 @torch.no_grad()
-def build_h(x, y, n_examples, d_dim):
+def build_h(x, y, n_examples, d_dim, is_eval=False):
     # Vectorized build_h:
     # We have N = n_examples, D = d_dim.
     # h shape before transpose: (2N+1, D)
@@ -78,16 +83,16 @@ def build_h(x, y, n_examples, d_dim):
     N = n_examples
     D = d_dim
 
-    h_matrix = torch.zeros((2*N + 1, D), device=x.device, dtype=x.dtype)
+    h_matrix = torch.zeros((2*N, D), device=x.device, dtype=x.dtype)
     # Fill even rows with x[:N]
     h_matrix[0:2*N:2] = x[:N]
     # Fill odd rows with y[:N] in the first column
     h_matrix[1:2*N:2, 0] = y[:N]
-    # Last row is x[N]
-    h_matrix[-1] = x[N]
 
-    # Transpose to get final shape: (D, 2N+1)
-    return h_matrix.T
+    if is_eval:
+        return h_matrix[:-1]
+    else:
+        return h_matrix
 
 
 # ----------------------------
@@ -115,10 +120,10 @@ class InContextIterableDataset(IterableDataset):
         while True:
             x = sample_x(self.n_examples, self.d_dim, self.device)
             z = sample_z(self.n_examples, self.device)
-            y = compute_y(x, z, self.phi_mlp, self.tau, self.hidden_d_dim)
+            y = compute_y(x, z, self.phi_mlp, self.tau, self.hidden_d_dim, is_eval=False)
             h = build_h(x, y, self.n_examples, self.d_dim)
             # "h" and "y" are on GPU already
-            yield {"h": h, "y": y[self.n_examples].unsqueeze(0)}
+            yield {"h": h, "y": y}
 
 
 class InContextValDataset(Dataset):
@@ -146,9 +151,9 @@ class InContextValDataset(Dataset):
     def __getitem__(self, idx):
         x = sample_x(self.n_examples, self.d_dim, self.device)
         z = sample_z(self.n_examples, self.device)
-        y = compute_y(x, z, self.phi_mlp, self.tau, self.hidden_d_dim)
+        y = compute_y(x, z, self.phi_mlp, self.tau, self.hidden_d_dim, is_eval=False)
         h = build_h(x, y, self.n_examples, self.d_dim)
-        return {"h": h, "y": y[self.n_examples].unsqueeze(0)}
+        return {"h": h, "y": y[self.n_examples - 1].unsqueeze(0)}
 
 # ----------------------------
 # Training Configuration
@@ -207,7 +212,10 @@ class Trainer:
         n_examples = training_config.get("n_examples", 5)
         tau = training_config.get("tau", 1.0)
         batch_size = training_config["batch_size"]
-        num_val_samples = training_config.get("num_val_samples", 1000)
+        # num_val_samples = training_config.get("num_val_samples", 1000)
+
+        num_val_samples = 15600
+
 
         # Infinite training dataset as IterableDataset
         train_dataset = InContextIterableDataset(d_dim=d_dim, hidden_d_dim=hidden_d_dim, n_examples=n_examples, tau=tau)
@@ -301,10 +309,9 @@ class Trainer:
 
                 # Use mixed precision for forward pass and loss computation
                 with torch.cuda.amp.autocast():
-                    output = self.model(h)  # output shape: (batch_size, seq_len, n_vocab)
-                    output = output[:, -1]  # Select the last token's output (batch_size, n_vocab)
-                    if output.dim() == 2 and output.size(-1) == 1:
-                        output = output.squeeze(-1)  # shape: (batch_size,)
+                    output = self.model(h)  # output shape: (batch_size, T, 1)
+                    output = output[:, ::2].squeeze(-1)
+
                     loss = F.mse_loss(output, y)
 
                 # Backpropagation with mixed precision
@@ -318,12 +325,18 @@ class Trainer:
                 self.train_losses.append(loss.item())
 
                 self.current_iter += 1
+
+                if self.current_iter % 100 == 0 or self.current_iter == 1:
+                    print(f"Iter: {self.current_iter:<12} | Loss: {loss.item():<10.6f} | Time: {t1 - t0:<8.6f}")
+
+
                 if self.current_iter % self.save_every == 0:
                     self.batch_idx = idx
                     self._save_checkpoint()
 
-                if self.current_iter % 100 == 0:
-                    print(f"Iter: {self.current_iter:<12} | Loss: {loss.item():<10.6f} | Time: {t1 - t0:<8.6f}")
+                
+
+                
 
                 if self.current_iter >= self.max_iters:
                     break
@@ -352,50 +365,125 @@ class Trainer:
         self.val_losses.append(val_loss)
         print(f"Validation Loss (Iteration {self.current_iter}): {val_loss} in {count} batches")
 
+    def test(self):
+        self.model.eval()
+
+        # Extract parameters from training_config
+        n_examples_max = self.training_config.get("n_examples", 5)
+        tau = self.training_config.get("tau", 1.0)
+        d_dim = self.training_config.get("d_dim", 10)
+        hidden_d_dim = self.training_config.get("hidden_d_dim", 20)
+        # Using the same number of validation samples as in _load_dataloader
+        num_val_samples = 15600  
+        batch_size = self.training_config["batch_size"]
+
+        results = {}
+        with torch.no_grad():
+            for n_examples_current in range(2, n_examples_max + 1):
+                # Create a new validation dataset and loader for the current n_examples
+                val_dataset = InContextValDataset(
+                    d_dim=d_dim,
+                    hidden_d_dim=hidden_d_dim,
+                    n_examples=n_examples_current,
+                    tau=tau,
+                    num_val_samples=num_val_samples
+                )
+                val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+                total_loss = 0
+                count = 0
+
+                for batch in val_loader:
+                    h = batch["h"].to(self.device, non_blocking=True)
+                    y = batch["y"].to(self.device, non_blocking=True)
+
+                    # Determine the required final dimension based on the current n_examples
+                    n_examples = self.training_config.get("n_examples", 41)
+                    required_length = n_examples * 2 + 1
+                    current_length = h.size(-1)
+
+                    # Pad with zeros at the end
+                    if current_length < required_length:
+                        # Pad with zeros at the end
+                        diff = required_length - current_length
+                        h = F.pad(h, (0, diff), mode='constant', value=0)
+                    elif current_length > required_length:
+                        # If there are more tokens than required, truncate
+                        h = h[:, :, :required_length]
+
+                    # Use mixed precision evaluation
+                    with torch.cuda.amp.autocast():
+                        output = self.model(h)  # (batch_size, seq_len, n_vocab)
+                        output = output[:, -1]  # select last token output
+                        if output.dim() == 2 and output.size(-1) == 1:
+                            output = output.squeeze(-1)  # shape: (batch_size,)
+
+                        loss = F.mse_loss(output, y)
+                        total_loss += loss.item()
+                        count += 1
+
+                val_loss = total_loss / count if count > 0 else float('inf')
+                results[n_examples_current] = val_loss
+                print(f"Validation for n_examples={n_examples_current}: {val_loss}")
+
+        results_filename = os.path.join(self.checkpoint_dir, "test_results.json")
+        with open(results_filename, "w") as f:
+            json.dump(results, f, indent=4)
+
+        print(f"Results saved to {results_filename}")
+        return results
+
+
 
 def plots():
     # Path to the checkpoint file
-    checkpoint_path = "checkpoints/DiffFormer/Iteration_5000.pth"
+    checkpoint_path = "diff_final.pth"
     
     # Load the checkpoint
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     
     # Extract the loss lists
-    train_losses = checkpoint.get("train_losses", [])
-    val_losses = checkpoint.get("val_losses", [])
+    train_losses_DX = checkpoint.get("train_losses", [])
+    val_losses_DX = checkpoint.get("val_losses", [])
 
-    if not train_losses and not val_losses:
-        print("No losses found in the checkpoint.")
-        return
+    checkpoint_path = "transformer_final.pth"
+    
+    # Load the checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    
+    # Extract the loss lists
+    train_losses_D = checkpoint.get("train_losses", [])
+    val_losses_D = checkpoint.get("val_losses", [])
+
 
     # Plot training losses
-    if train_losses:
-        plt.figure(figsize=(10, 6))
-        plt.plot(train_losses, label="Train Loss", color="blue", linewidth=2)
-        plt.title("Training Loss Over Time")
-        plt.xlabel("Iterations")
-        plt.ylabel("Loss")
-        plt.ylim(top=2.0)  # Set the max y-limit
-        plt.legend()
-        plt.grid(True)
-        plt.savefig("train_loss_plot.png")
-        plt.close()
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_losses_DX, label="Train Loss - diff", linewidth=2)
+    plt.plot(train_losses_D, label="Train Loss - transformer", linewidth=2)
+    plt.title("Training Loss Over Time")
+    plt.xlabel("Iterations")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("train_loss_plot.png")
+    plt.close()
 
     # Plot validation losses
-    if val_losses:
-        plt.figure(figsize=(10, 6))
-        plt.plot(val_losses, label="Val Loss", color="orange", linewidth=2)
-        plt.title("Validation Loss Over Time")
-        plt.xlabel("Evaluation Steps")
-        plt.ylabel("Loss")
-        plt.ylim(top=2.0)  # Set the max y-limit
-        plt.legend()
-        plt.grid(True)
-        plt.savefig("val_loss_plot.png")
-        plt.close()
+    plt.figure(figsize=(10, 6))
+    plt.plot(val_losses_DX, label="Val Loss - diff")
+    plt.plot(val_losses_D, label="Val Loss - transformer")
+    plt.title("Validation Loss Over Time")
+    plt.xlabel("Evaluation Steps")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("val_loss_plot.png")
+    plt.close()
 
 
 def main():
+    # plots()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 

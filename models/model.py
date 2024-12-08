@@ -147,13 +147,13 @@ class TransModel(nn.Module):
         else:
             print("Using Vanilla Transformer")
         
-        self.projection = nn.Linear(in_features=83, out_features=config.n_embed)
+        self.projection = nn.Linear(in_features=20, out_features=config.n_embed)
 
         self.blocks = nn.ModuleList([Block(config, i+1) for i in range(config.n_layer)])
 
         # Removed embedding layer
         # Removed weight tying since there's no embedding now
-        self.lm_head = nn.Linear(config.n_embed, config.n_vocab, bias=False)
+        self.lm_head = nn.Linear(config.n_embed, 1, bias=False)
 
     def forward(self, x):
         # Now x is expected to be of shape (B, T, n_embed) directly.

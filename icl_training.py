@@ -349,12 +349,9 @@ class Trainer:
 
                 with torch.cuda.amp.autocast():  # Mixed precision in evaluation
                     output = self.model(h)  # output shape: (batch_size, seq_len, n_vocab)
-                    print("output init: ", output.shape)
                     output = output[:, -1]  # Select the last token's output (batch_size, n_vocab)
                     if output.dim() == 2 and output.size(-1) == 1:
                         output = output.squeeze(-1)  # shape: (batch_size,)
-                    print("output after: ", output.shape)
-                    print("y after: ", y.shape)
                     loss = F.mse_loss(output, y)
                     total_loss += loss.item()
                     count += 1
@@ -377,7 +374,7 @@ class Trainer:
 
         results = {}
         with torch.no_grad():
-            for n_examples_current in range(2, n_examples_max + 1):
+            for n_examples_current in range(2, n_examples_max):
                 # Create a new validation dataset and loader for the current n_examples
                 val_dataset = InContextValDataset(
                     d_dim=d_dim,
@@ -386,39 +383,24 @@ class Trainer:
                     tau=tau,
                     num_val_samples=num_val_samples
                 )
-                val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+                test_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
                 total_loss = 0
                 count = 0
 
-                for batch in val_loader:
+                for batch in test_loader:
+                # Move data to GPU
                     h = batch["h"].to(self.device, non_blocking=True)
-                    y = batch["y"].to(self.device, non_blocking=True)
+                    y = batch["y"].to(self.device, non_blocking=True).squeeze(-1)
 
-                    # Determine the required final dimension based on the current n_examples
-                    n_examples = self.training_config.get("n_examples", 41)
-                    required_length = n_examples * 2 + 1
-                    current_length = h.size(-1)
-
-                    # Pad with zeros at the end
-                    if current_length < required_length:
-                        # Pad with zeros at the end
-                        diff = required_length - current_length
-                        h = F.pad(h, (0, diff), mode='constant', value=0)
-                    elif current_length > required_length:
-                        # If there are more tokens than required, truncate
-                        h = h[:, :, :required_length]
-
-                    # Use mixed precision evaluation
-                    with torch.cuda.amp.autocast():
-                        output = self.model(h)  # (batch_size, seq_len, n_vocab)
-                        output = output[:, -1]  # select last token output
+                    with torch.cuda.amp.autocast():  # Mixed precision in evaluation
+                        output = self.model(h)  # output shape: (batch_size, seq_len, n_vocab)
+                        output = output[:, -1]  # Select the last token's output (batch_size, n_vocab)
                         if output.dim() == 2 and output.size(-1) == 1:
                             output = output.squeeze(-1)  # shape: (batch_size,)
-
                         loss = F.mse_loss(output, y)
                         total_loss += loss.item()
-                        count += 1
+                    count += 1
 
                 val_loss = total_loss / count if count > 0 else float('inf')
                 results[n_examples_current] = val_loss
@@ -430,6 +412,7 @@ class Trainer:
 
         print(f"Results saved to {results_filename}")
         return results
+
 
 
 
@@ -507,30 +490,30 @@ def main():
         gpu_id=None,
     )
 
-    trainer.train()
+    trainer.test()
 
-    print("--------------------------TRAINING VANILLIA TRANSFORMER---------------------------------")
+    # print("--------------------------TRAINING VANILLIA TRANSFORMER---------------------------------")
 
-    with open("config_ICL2_D.yaml", "r") as file:
-        training_config = yaml.safe_load(file)
+    # with open("config_ICL2_D.yaml", "r") as file:
+    #     training_config = yaml.safe_load(file)
 
-    lr = training_config["learning_rate"]
+    # lr = training_config["learning_rate"]
 
-    config = LMConfig(**LM_ARGS["122M"], is_diff=training_config["architecture"] == "DiffFormer")
-    model = TransModel(config)
-    model = torch.compile(model, mode="default", backend="inductor")
+    # config = LMConfig(**LM_ARGS["122M"], is_diff=training_config["architecture"] == "DiffFormer")
+    # model = TransModel(config)
+    # model = torch.compile(model, mode="default", backend="inductor")
 
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    # print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    # optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    trainer = Trainer(
-        model=model,
-        training_config=training_config,
-        optimizer=optimizer,
-        gpu_id=None,
-    )
+    # trainer = Trainer(
+    #     model=model,
+    #     training_config=training_config,
+    #     optimizer=optimizer,
+    #     gpu_id=None,
+    # )
 
-    trainer.train()
+    # trainer.train()
     
 
 

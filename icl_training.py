@@ -151,9 +151,9 @@ class InContextValDataset(Dataset):
     def __getitem__(self, idx):
         x = sample_x(self.n_examples, self.d_dim, self.device)
         z = sample_z(self.n_examples, self.device)
-        y = compute_y(x, z, self.phi_mlp, self.tau, self.hidden_d_dim, is_eval=False)
-        h = build_h(x, y, self.n_examples, self.d_dim)
-        return {"h": h, "y": y[self.n_examples - 1].unsqueeze(0)}
+        y = compute_y(x, z, self.phi_mlp, self.tau, self.hidden_d_dim, is_eval=True)
+        h = build_h(x, y, self.n_examples, self.d_dim, is_eval=True)
+        return {"h": h, "y": y[-1].unsqueeze(0)}
 
 # ----------------------------
 # Training Configuration
@@ -334,10 +334,6 @@ class Trainer:
                     self.batch_idx = idx
                     self._save_checkpoint()
 
-                
-
-                
-
                 if self.current_iter >= self.max_iters:
                     break
 
@@ -349,14 +345,16 @@ class Trainer:
             for batch in self.val_loader:
                 # Move data to GPU
                 h = batch["h"].to(self.device, non_blocking=True)
-                y = batch["y"].to(self.device, non_blocking=True)
+                y = batch["y"].to(self.device, non_blocking=True).squeeze(-1)
 
                 with torch.cuda.amp.autocast():  # Mixed precision in evaluation
                     output = self.model(h)  # output shape: (batch_size, seq_len, n_vocab)
+                    print("output init: ", output.shape)
                     output = output[:, -1]  # Select the last token's output (batch_size, n_vocab)
                     if output.dim() == 2 and output.size(-1) == 1:
                         output = output.squeeze(-1)  # shape: (batch_size,)
-
+                    print("output after: ", output.shape)
+                    print("y after: ", y.shape)
                     loss = F.mse_loss(output, y)
                     total_loss += loss.item()
                     count += 1

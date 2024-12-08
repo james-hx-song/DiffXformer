@@ -19,42 +19,50 @@ class TransformerWrapper(LM):
         self.model = model.to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.device = device
+        self.tokenizer.pad_token = self.tokenizer.eos_token
     def loglikelihood(self, requests: list[Instance]) -> list[tuple[float, bool]]:
         self.model.eval()
         #...
         toret = []
+        BATCH_SIZE = 16
+        for index in tqdm(range((len(requests) - 1) // BATCH_SIZE + 1)):
+            curr_requests = requests[index * BATCH_SIZE: min((index + 1) * BATCH_SIZE, len(requests))]
+            inputs = [request.args[0] for request in curr_requests]
+            expected_outputs = [request.args[1] for request in curr_requests]
+            input_plus_output = [inputs[x] + expected_outputs[x] for x in range(len(inputs))]
+            expected_outputs = [self.tokenizer(expected_output, return_tensors="pt")['input_ids'] for expected_output in expected_outputs]
+            # print(expected_outputs)
+            tokenizer_output = self.tokenizer(inputs, return_tensors="pt", padding=True)
+            inputs = tokenizer_output['input_ids']
+            inputs_attn = tokenizer_output['attention_mask']
 
-        for request in tqdm(requests):
-            log_probability = 0
-            input, expected_output = request.args
-            input = self.tokenizer(input, return_tensors="pt")['input_ids']
-            expected_output = self.tokenizer(expected_output, return_tensors="pt")['input_ids']
-            # print(expected_output.numpy())
+            tokenizer_output = self.tokenizer(input_plus_output, return_tensors="pt", padding=True)
+            input_plus_output = tokenizer_output['input_ids'].to(self.device)
+            input_plus_output_attn = tokenizer_output['attention_mask']
+
+            results = self.model.forward(input_plus_output)
             log_softmax = nn.LogSoftmax(dim = 1)
-            model_input = torch.cat((input, expected_output), dim = 1) # self.tokenizer.convert_ids_to_tokens(
-
-            model_input = model_input.to(self.device)
-            results = self.model.forward(model_input)
-
-            output_logits = log_softmax(results)
-            # print(output_logits.shape)
-            is_greedy = True
-            for index, expected_token in enumerate(expected_output[0][:]):
-                # Find probability that expected_token would be chosen from output_logits
-                # print(expected_token.numpy())
-                token_id = expected_token #self.tokenizer.convert_tokens_to_ids(expected_token)
-                # for x in range(output_logits.shape[2]):
-                #     log_probability += output_logits[0][index+input.shape[0]][x].item()
-                log_probability += output_logits[0][index+input.shape[0] - 1][token_id].item()
-                if is_greedy:
-                    for prob in output_logits[0][index]:
-                        if prob.item() > output_logits[0][index][token_id].item():
-                            is_greedy = False
-                # input = torch.cat(input, expected_token, dim = 0)
-                # output_logits = log_softmax(self.model.forward(input))
-            toret.append((log_probability, is_greedy))
+            output_logits = log_softmax(results).cpu()
+            for request in range(len(expected_outputs)):
+                is_greedy = True
+                input_len = torch.sum(inputs_attn[request])
+                # input_len = inputs_attn[request].index(0)
+                # if input_len == inputs_attn.size[1]:
+                #     input_len = inputs.shape[1]
+                # input_plus_output_len = input_plus_output_attn[request].index(0)
+                input_plus_output_len = torch.sum(input_plus_output[request])
+                # if input_plus_output_len < 0:
+                #     input_plus_output_len = input_plus_output.shape[1]
+                log_probability = 0
+                for index, expected_token in enumerate(expected_outputs[request][0]):
+                    if index < input_plus_output_len:
+                        log_probability += output_logits[request][index + input_len - 1][expected_token].item()
+                        if is_greedy:
+                            for prob in output_logits[request][index]:
+                                if prob.item() > output_logits[request][index][expected_token].item():
+                                    is_greedy = False
+                toret.append((log_probability, is_greedy))
         return toret
-
 
     def loglikelihood_rolling(self, requests: list[Instance]) -> list[tuple[float, bool]]:
         toret = []

@@ -33,7 +33,13 @@ print("Model ready")
 tokenizer_name = "HuggingFaceTB/SmolLM-135M"
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-wrapper = TransformerWrapper(model, tokenizer_name, device)
+wrapper = TransformerWrapper(
+    model=model, 
+    tokenizer=tokenizer,
+    batch_size=4,
+    device=device,
+    model_type="custom"
+)
 
 # requests = [("context1", "continuation1"), ("context2", "continuation2")]
 # requests = [Instance("loglikelihood", {}, ( "context1", "continuation1"), 0), Instance("loglikelihood", {},( "context1", "continuation1"), 1)]
@@ -59,5 +65,5 @@ results = lm_eval.simple_evaluate(
     cache_requests=True
 )
 
-with open(f'{task}_{name}_results_2.json', 'w') as f:
+with open(f'{task}_{name}_results.json', 'w') as f:
     json.dump(results, f, indent=4)

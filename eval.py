@@ -104,7 +104,7 @@ class Evaluator:
             print(f"Validation Loss (Iteration {self.current_iter}): {avg_val_loss}")
             wandb.log({"val_loss": avg_val_loss, "iteration": self.current_iter})
 
-    def eval_output(self, similarity=False, sim_model=None, tokenizer=None):
+    def eval_output(self, similarity=False, sim_model=None, tokenizer=None, beam_search=False):
         self.model.eval()
 
         # Statistics for multiple choice evaluation
@@ -125,14 +125,6 @@ class Evaluator:
                     break
                 x = batch['query'].to(self.gpu_id)
                 y = batch['answer'].to(self.gpu_id)
-                # mask = batch['mask'].to(self.gpu_id)
-                
-                # Assume generate function is implemented in the model for evaluation
-                # Adjust max_length and eos_token_id as appropriate
-                
-                # logits = self.model(output_ids)  # Recompute logits for the generated sequence
-                # loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1), reduction='none')
-                # loss = (loss * mask.view(-1)).sum() / mask.sum()
                 if not similarity:
                     output_ids, logits_list = self.model.generate(x, 
                                                                   max_length=1, 
@@ -150,9 +142,15 @@ class Evaluator:
                     
                 else:
                     # Open-ended evaluation with similarity
-                    output_ids, _ = self.model.generate(x, 
+                    if beam_search:
+                        output_ids, _ = self.model.beam_search(x, 
                                                         max_length=100, 
+                                                        beam_width=10,
                                                         eos_token_id=tokenizer.eos_token_id)
+                    else:
+                        output_ids, _ = self.model.generate(x, 
+                                                            max_length=100, 
+                                                            eos_token_id=tokenizer.eos_token_id)
                     # Decode predicted text
                     predicted_text = tokenizer.decode(output_ids[0][x.shape[1]:], skip_special_tokens=True)
                     predicted_text = predicted_text.split(".")[0].strip() if len(predicted_text.split(".")) > 1 else predicted_text
@@ -185,13 +183,14 @@ class Evaluator:
                 
             # Save the results to a json file
             if similarity:
-                
-                with open(os.path.join("checkpoints", self.eval_config['work_dir'], "groundtruth.json"), "w") as f:
-                    json.dump(groundtruth_json, f)
-                with open(os.path.join("checkpoints", self.eval_config['work_dir'], "predicted.json"), "w") as f:
-                    json.dump(predicted_json, f)
-                with open(os.path.join("checkpoints", self.eval_config['work_dir'], "questions.json"), "w") as f:
-                    json.dump(questions_json, f)
+                def save_as_jsonl(list_of_dicts, filename):
+                    with open(filename, "w") as f:
+                        for item in list_of_dicts:
+                            f.write(json.dumps(item) + "\n")
+
+                save_as_jsonl(groundtruth_json, os.path.join("checkpoints", self.eval_config['work_dir'], f"groundtruth{"_beam_search" if beam_search else ""}.json"))
+                save_as_jsonl(predicted_json, os.path.join("checkpoints", self.eval_config['work_dir'], f"predicted{"_beam_search" if beam_search else ""}.json"))
+                save_as_jsonl(questions_json, os.path.join("checkpoints", self.eval_config['work_dir'], f"questions{"_beam_search" if beam_search else ""}.json"))
 
 
 def main():
@@ -199,6 +198,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--similarity", action="store_true")
+    parser.add_argument("--beam_search", action="store_true")
     args = parser.parse_args()
     
     with open(args.config, "r") as file:

@@ -18,21 +18,16 @@ class MultiHeadDiffAttention(nn.Module):
         self.c_proj = nn.Linear(config.n_embed, config.n_embed, bias=False)
         self.n_head = config.n_head
 
-        self.head_dim = config.n_embed // config.n_head // 2 
+        self.head_dim = config.n_embed // config.n_head // 2
 
         self.lambda_init = lambda_init(layer)
-        self.lambda_q1 = nn.Parameter(torch.zeros(
-            self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
-        self.lambda_k1 = nn.Parameter(torch.zeros(
-            self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
-        self.lambda_q2 = nn.Parameter(torch.zeros(
-            self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
-        self.lambda_k2 = nn.Parameter(torch.zeros(
-            self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
+        self.lambda_q1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
+        self.lambda_k1 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
+        self.lambda_q2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
+        self.lambda_k2 = nn.Parameter(torch.zeros(self.head_dim, dtype=torch.float32).normal_(mean=0.0, std=0.1))
 
-        self.RMSNorm = nn.RMSNorm(
-            2 * self.head_dim, eps=1e-5, elementwise_affine=False)
-        
+        self.RMSNorm = nn.RMSNorm(2 * self.head_dim, eps=1e-5, elementwise_affine=False)
+
         self.rope = tt.modules.RotaryPositionalEmbeddings(dim=self.head_dim, max_seq_len=config.n_ctx, base=10000)
 
     def forward(self, x):
@@ -52,11 +47,9 @@ class MultiHeadDiffAttention(nn.Module):
         q1, q2 = q1.transpose(1, 2), q2.transpose(1, 2)
         k1, k2 = k1.transpose(1, 2), k2.transpose(1, 2)
 
-        v = v.view(B, T, self.n_head, 2*self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_head, 2 * self.head_dim).transpose(1, 2)
 
-        lambda_ = torch.exp(torch.dot(self.lambda_q1, self.lambda_k1)) - \
-            torch.exp(torch.dot(self.lambda_q2, self.lambda_k2)) + \
-            self.lambda_init
+        lambda_ = torch.exp(torch.dot(self.lambda_q1, self.lambda_k1)) - torch.exp(torch.dot(self.lambda_q2, self.lambda_k2)) + self.lambda_init
 
         A1 = F.scaled_dot_product_attention(q1, k1, v, is_causal=True)
         A2 = F.scaled_dot_product_attention(q2, k2, v, is_causal=True)
@@ -80,9 +73,8 @@ class MultiHeadAttention(nn.Module):
         self.n_head = config.n_head
 
         self.head_dim = config.n_embed // config.n_head
-        self.RMSNorm = nn.RMSNorm(
-            self.head_dim, eps=1e-5, elementwise_affine=False)
-        
+        self.RMSNorm = nn.RMSNorm(self.head_dim, eps=1e-5, elementwise_affine=False)
+
         self.rope = tt.modules.RotaryPositionalEmbeddings(dim=self.head_dim, max_seq_len=config.n_ctx, base=10000)
 
     def forward(self, x):
@@ -90,9 +82,9 @@ class MultiHeadAttention(nn.Module):
         qkv = self.c_attn(x)
         q, k, v = torch.split(qkv, [C, C, C], dim=-1)
 
-        q = q.view(B, T, self.n_head, self.head_dim)
-        k = k.view(B, T, self.n_head, self.head_dim)
-        v = v.view(B, T, self.n_head, self.head_dim)
+        q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, H, T, D)
+        k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, H, T, D)
+        v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B, H, T, D)
 
         q = self.rope(q)
         k = self.rope(k)
@@ -146,10 +138,10 @@ class TransModel(nn.Module):
             print("Using Differential Transformer")
         else:
             print("Using Vanilla Transformer")
-        
+
         self.projection = nn.Linear(in_features=20, out_features=config.n_embed)
 
-        self.blocks = nn.ModuleList([Block(config, i+1) for i in range(config.n_layer)])
+        self.blocks = nn.ModuleList([Block(config, i + 1) for i in range(config.n_layer)])
 
         # Removed embedding layer
         # Removed weight tying since there's no embedding now
@@ -160,7 +152,7 @@ class TransModel(nn.Module):
         assert x.size(1) <= self.config.n_ctx, "Context length exceeds model's maximum context length"
 
         x = self.projection(x)
-        
+
         for block in self.blocks:
             x = block(x)
 
@@ -170,5 +162,6 @@ class TransModel(nn.Module):
 
 if __name__ == "__main__":
     from configs.config import LMConfig, ToyTransConfig, LM_ARGS
+
     model = TransModel(LMConfig(**LM_ARGS["204M"]))
     print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")

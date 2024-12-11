@@ -310,6 +310,7 @@ class Trainer:
     def train(self):
         self.model.train()
         scaler = torch.amp.GradScaler()  # For mixed precision training
+        total_train_loss = 0
         while self.current_iter < self.max_iters:
             for idx, batch in enumerate(self.train_loader):
                 if self.current_iter >= self.max_iters:
@@ -343,9 +344,12 @@ class Trainer:
                 self.train_losses.append(loss.item())
 
                 self.current_iter += 1
+                total_train_loss += loss.item()
 
-                if self.current_iter % 100 == 0 or self.current_iter == 1:
-                    print(f"Iter: {self.current_iter:<12} | Loss: {loss.item():<10.6f} | Time: {t1 - t0:<8.6f}")
+                if self.current_iter % 100 == 0:
+                    ave_loss = total_train_loss / 100
+                    print(f"Iter: {self.current_iter:<12} | Loss: {ave_loss:<10.6f} | Time: {t1 - t0:<8.6f}")
+                    total_train_loss = 0
 
                 if self.current_iter % self.save_every == 0:
                     self.batch_idx = idx
@@ -392,13 +396,13 @@ class Trainer:
         d_dim = self.training_config.get("d_dim", 10)
         hidden_d_dim = self.training_config.get("hidden_d_dim", 20)
         # Using the same number of validation samples as in _load_dataloader
-        num_val_samples = 2560
+        num_val_samples = 25600
         batch_size = self.training_config["batch_size"]
         num_layers = self.training_config["num_mlp_layers"]
 
         results = {}
         with torch.no_grad():
-            for n_examples_current in range(39, n_examples_max + 1):
+            for n_examples_current in range(2, n_examples_max + 1):
                 # Create a new validation dataset and loader for the current n_examples
                 test_dataset = InContextValDataset(
                     d_dim=d_dim,
@@ -413,8 +417,8 @@ class Trainer:
                 count = 0
                 for batch in test_loader:
                     # Move data to GPU
-                    h = batch["h"].to(self.device, non_blocking=True)
-                    y = batch["y"].to(self.device, non_blocking=True)
+                    h = batch["h"].to(self.device)
+                    y = batch["y"].to(self.device)
 
                     with torch.amp.autocast(device_type=self.device):  # Mixed precision in evaluation
                         output = self.model(h)  # Pass the full input through the model
@@ -495,44 +499,50 @@ def plots(file1, file2):
 
 
 def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    # plots()
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # print(f"Using device: {device}")
 
-    print("--------------------------TRAINING DIFF TRANSFORMER 01 ---------------------------------")
+    SIGMAS = [0, 0.1, 0.5]
+    MODELS = ["DiffFormer", "Vanilla"]
 
-    with open("config_ICL2_DX.yaml", "r") as file:
-        training_config = yaml.safe_load(file)
+    for model_type in MODELS:
+        print(f"--------------------------TRAINING {model_type.upper()} TRANSFORMER---------------------------------")
 
-    lr = training_config["learning_rate"]
+        config_file = "config_ICL2_DX.yaml" if model_type == "DiffFormer" else "config_ICL2_D.yaml"
 
-    config = LMConfig(**LM_ARGS["122M"], is_diff=training_config["architecture"] == "DiffFormer")
-    model = TransModel(config)
-    model = torch.compile(model, mode="default", backend="inductor")
+        with open(config_file, "r") as file:
+            training_config = yaml.safe_load(file)
 
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        lr = training_config["learning_rate"]
 
-    trainer = Trainer(model=model, training_config=training_config, optimizer=optimizer, gpu_id=None, model_name="diff_01", sigma=0.1)
+        config = LMConfig(**LM_ARGS["122M"], is_diff=model_type == "DiffFormer")
+        model = TransModel(config)
+        model = torch.compile(model, mode="default", backend="inductor")
 
-    trainer.train()
+        print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
-    print("--------------------------TRAINING VANILLIA TRANSFORMER---------------------------------")
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    with open("config_ICL2_D.yaml", "r") as file:
-        training_config = yaml.safe_load(file)
+        for sigma in SIGMAS:
+            print(f"Training {model_type} Transformer with sigma={sigma * 10}")
 
-    lr = training_config["learning_rate"]
+            trainer = Trainer(
+                model=model,
+                training_config=training_config,
+                optimizer=optimizer,
+                gpu_id=None,
+                model_name=f"{model_type.lower()}_sigma_{sigma}",
+                sigma=sigma,
+            )
 
-    config = LMConfig(**LM_ARGS["122M"], is_diff=training_config["architecture"] == "DiffFormer")
-    model = TransModel(config)
-    model = torch.compile(model, mode="default", backend="inductor")
+            trainer.train()
+            trainer.test()
 
-    print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-    trainer = Trainer(model=model, training_config=training_config, optimizer=optimizer, gpu_id=None, model_name="trans_01", sigma=0.1)
-
-    trainer.train()
+    # plot files:
+    # file_one = "./checkpoints/diff_01/test_results.json"
+    # file_two = "./checkpoints/trans_01/test_results.json"
+    # plots(file_one, file_two)
 
 
 if __name__ == "__main__":

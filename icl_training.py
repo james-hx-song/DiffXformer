@@ -24,30 +24,47 @@ import json
 # New Dataset and Model Setup
 # ----------------------------
 
-class PhiMLP(nn.Module):
-    def __init__(self, d_dim, hidden_d_dim, num_layers, seed=42):
-        super(PhiMLP, self).__init__()
-        self.seed = seed
-        layers = []
-        layers.append(nn.Linear(d_dim, hidden_d_dim))
-        layers.append(nn.LeakyReLU())
-        for _ in range(num_layers - 2):
-            layers.append(nn.Linear(hidden_d_dim, hidden_d_dim))
-            layers.append(nn.LeakyReLU())
-        layers.append(nn.Linear(hidden_d_dim, hidden_d_dim))
-        self.mlp = nn.Sequential(*layers)
-        self._initialize_weights()
 
-    def _initialize_weights(self):
-        torch.manual_seed(self.seed)
-        for m in self.mlp:
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+class RandomMLP:
+    """
+    A manually implemented MLP with fixed random weights and LeakyReLU activation.
+    This replaces PhiMLP but retains the multi-layer structure and nonlinearity.
+    """
+
+    def __init__(self, d_dim, hidden_d_dim, num_layers, seed=42):
+        torch.manual_seed(seed)  # Ensure reproducibility
+        self.num_layers = num_layers
+        self.weights = []
+        self.biases = []
+
+        # Initialize weights and biases for each layer
+        for i in range(num_layers):
+            in_dim = d_dim if i == 0 else hidden_d_dim
+            out_dim = hidden_d_dim
+            weight = torch.randn(in_dim, out_dim)
+            nn.init.kaiming_normal_(weight)  # Use Kaiming initialization
+            bias = torch.zeros(out_dim)
+            self.weights.append(weight)
+            self.biases.append(bias)
+
+        # Convert to tensors on the appropriate device during use
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def to(self, device):
+        """Move weights and biases to the specified device."""
+        self.device = device
+        self.weights = [w.to(device) for w in self.weights]
+        self.biases = [b.to(device) for b in self.biases]
 
     def forward(self, x):
-        return self.mlp(x)
+        """
+        Forward pass through the MLP.
+        """
+        for i in range(self.num_layers):
+            x = torch.matmul(x, self.weights[i]) + self.biases[i]
+            if i < self.num_layers - 1:  # Apply LeakyReLU except on the last layer
+                x = torch.nn.functional.leaky_relu(x, negative_slope=0.01)
+        return x
 
 
 def sample_x(n_examples, d_dim, device):
@@ -55,21 +72,23 @@ def sample_x(n_examples, d_dim, device):
     return torch.rand(n_examples, d_dim, device=device)
 
 
-def sample_z(n_examples, device):
+def sample_z(n_examples, device, sigma):
     # noise sample from N(0,1)
-    return torch.randn(n_examples, device=device) * 0.1
+    return torch.randn(n_examples, device=device) * sigma
 
 
-@torch.no_grad()
-def compute_y(x, z, phi_mlp, tau, hidden_d_dim, is_eval=False):
+def compute_y(x, z, random_mlp, tau, is_eval=False):
+    """
+    Updated compute_y to use the RandomMLP instead of PhiMLP.
+    """
     # w ~ N(0, tau^2)
-    w = torch.randn(hidden_d_dim, device=x.device) * (tau**2)
-    phi_x = phi_mlp(x)  # Shape: (n_examples+1, hidden_d_dim)
-    dot_product = torch.matmul(phi_x, w)  # Shape: (n_examples+1,)
+    w = torch.randn(random_mlp.weights[-1].size(1), device=x.device) * (tau**2)
+    phi_x = random_mlp.forward(x)  # Shape: (n_examples, hidden_d_dim)
+    dot_product = torch.matmul(phi_x, w)  # Shape: (n_examples,)
     if not is_eval:
-        y = dot_product + z  # Shape: (n_examples+1,)
+        y = dot_product + z  # Shape: (n_examples,)
     else:
-        y = dot_product  # Shape: (n_examples+1,)
+        y = dot_product  # Shape: (n_examples,)
     return y
 
 
@@ -83,44 +102,41 @@ def build_h(x, y, n_examples, d_dim, is_eval=False):
     N = n_examples
     D = d_dim
 
-    h_matrix = torch.zeros((2*N, D), device=x.device, dtype=x.dtype)
+    h_matrix = torch.zeros((2 * N, D), device=x.device, dtype=x.dtype)
     # Fill even rows with x[:N]
-    h_matrix[0:2*N:2] = x[:N]
+    h_matrix[0 : 2 * N : 2] = x[:N]
     # Fill odd rows with y[:N] in the first column
-    h_matrix[1:2*N:2, 0] = y[:N]
+    h_matrix[1 : 2 * N : 2, 0] = y[:N]
 
     if is_eval:
-        return h_matrix[:-1]
+        return h_matrix
     else:
         return h_matrix
 
-
-# ----------------------------
-# Datasets
-# ----------------------------
 
 class InContextIterableDataset(IterableDataset):
     """
     Infinite training dataset implemented as an IterableDataset.
     """
-    def __init__(self, d_dim, hidden_d_dim, n_examples, tau):
+
+    def __init__(self, d_dim, hidden_d_dim, n_examples, tau, num_layers=2, seed=42, sigma=0.1):
         super().__init__()
         self.n_examples = n_examples
         self.d_dim = d_dim
         self.hidden_d_dim = hidden_d_dim
         self.tau = tau
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.sigma = sigma
 
-        self.phi_mlp = PhiMLP(d_dim, hidden_d_dim, num_layers=2).to(self.device)
-        # If PyTorch 2.0+, compile the model
-        if hasattr(torch, 'compile'):
-            self.phi_mlp = torch.compile(self.phi_mlp)
+        # Initialize a RandomMLP
+        self.random_mlp = RandomMLP(d_dim, hidden_d_dim, num_layers, seed=seed)
+        self.random_mlp.to(self.device)
 
     def __iter__(self) -> Iterator[dict]:
         while True:
             x = sample_x(self.n_examples, self.d_dim, self.device)
-            z = sample_z(self.n_examples, self.device)
-            y = compute_y(x, z, self.phi_mlp, self.tau, self.hidden_d_dim, is_eval=False)
+            z = sample_z(self.n_examples, self.device, sigma=self.sigma)
+            y = compute_y(x, z, self.random_mlp, self.tau, is_eval=False)
             h = build_h(x, y, self.n_examples, self.d_dim)
             # "h" and "y" are on GPU already
             yield {"h": h, "y": y}
@@ -130,7 +146,8 @@ class InContextValDataset(Dataset):
     """
     Finite validation dataset.
     """
-    def __init__(self, d_dim, hidden_d_dim, n_examples, tau, num_val_samples):
+
+    def __init__(self, d_dim, hidden_d_dim, n_examples, tau, num_val_samples, num_layers=2, seed=42):
         super().__init__()
         self.d_dim = d_dim
         self.hidden_d_dim = hidden_d_dim
@@ -139,10 +156,9 @@ class InContextValDataset(Dataset):
         self.num_val_samples = num_val_samples
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.phi_mlp = PhiMLP(d_dim, hidden_d_dim, num_layers=2).to(self.device)
-        # If PyTorch 2.0+, compile the model
-        if hasattr(torch, 'compile'):
-            self.phi_mlp = torch.compile(self.phi_mlp)
+        # Initialize a RandomMLP
+        self.random_mlp = RandomMLP(d_dim, hidden_d_dim, num_layers, seed=seed)
+        self.random_mlp.to(self.device)
 
     def __len__(self):
         return self.num_val_samples
@@ -150,15 +166,15 @@ class InContextValDataset(Dataset):
     @torch.no_grad()
     def __getitem__(self, idx):
         x = sample_x(self.n_examples, self.d_dim, self.device)
-        z = sample_z(self.n_examples, self.device)
-        y = compute_y(x, z, self.phi_mlp, self.tau, self.hidden_d_dim, is_eval=True)
+        z = sample_z(self.n_examples, self.device, sigma=0)
+        y = compute_y(x, z, self.random_mlp, self.tau, is_eval=True)
         h = build_h(x, y, self.n_examples, self.d_dim, is_eval=True)
-        return {"h": h, "y": y[-1].unsqueeze(0)}
+        return {"h": h, "y": y}
+
 
 # ----------------------------
 # Training Configuration
 # ----------------------------
-
 
 
 # wandb.init(
@@ -176,11 +192,7 @@ def ddp_setup(rank, world_size):
 
 class Trainer:
     def __init__(
-        self,
-        model: nn.Module,
-        training_config,
-        optimizer: torch.optim.Optimizer,
-        gpu_id: Optional[int],
+        self, model: nn.Module, training_config, optimizer: torch.optim.Optimizer, gpu_id: Optional[int], model_name: str, sigma: float
     ):
         self.training_config = training_config
         self.train_loader = self.val_loader = None
@@ -191,8 +203,10 @@ class Trainer:
         self.eval_every = training_config["eval_every"]
         self.batch_idx = 0
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.sigma = sigma
 
-        self.model_name = "DiffFormer" if training_config["architecture"] == "DiffFormer" else "Transformer"
+        # self.model_name = "DiffFormer" if training_config["architecture"] == "DiffFormer" else "Transformer"
+        self.model_name = model_name
         self.checkpoint_dir = f"checkpoints/{self.model_name}"
 
         self.model = model.to(self.device)
@@ -212,15 +226,19 @@ class Trainer:
         n_examples = training_config.get("n_examples", 5)
         tau = training_config.get("tau", 1.0)
         batch_size = training_config["batch_size"]
+        num_layers = training_config["num_mlp_layers"]
         # num_val_samples = training_config.get("num_val_samples", 1000)
 
         num_val_samples = 15600
 
-
         # Infinite training dataset as IterableDataset
-        train_dataset = InContextIterableDataset(d_dim=d_dim, hidden_d_dim=hidden_d_dim, n_examples=n_examples, tau=tau)
+        train_dataset = InContextIterableDataset(
+            d_dim=d_dim, hidden_d_dim=hidden_d_dim, n_examples=n_examples, tau=tau, num_layers=num_layers, sigma=self.sigma
+        )
         # Finite validation dataset
-        val_dataset = InContextValDataset(d_dim=d_dim, hidden_d_dim=hidden_d_dim, n_examples=n_examples, tau=tau, num_val_samples=num_val_samples)
+        val_dataset = InContextValDataset(
+            d_dim=d_dim, hidden_d_dim=hidden_d_dim, n_examples=n_examples, tau=tau, num_val_samples=num_val_samples, num_layers=num_layers
+        )
 
         # No shuffling needed for infinite dataset, just iterative sampling
         self.train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
@@ -291,7 +309,7 @@ class Trainer:
 
     def train(self):
         self.model.train()
-        scaler = torch.cuda.amp.GradScaler()  # For mixed precision training
+        scaler = torch.amp.GradScaler()  # For mixed precision training
         while self.current_iter < self.max_iters:
             for idx, batch in enumerate(self.train_loader):
                 if self.current_iter >= self.max_iters:
@@ -308,7 +326,7 @@ class Trainer:
                 self.optimizer.zero_grad()
 
                 # Use mixed precision for forward pass and loss computation
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast(device_type=self.device):
                     output = self.model(h)  # output shape: (batch_size, T, 1)
                     output = output[:, ::2].squeeze(-1)
 
@@ -329,7 +347,6 @@ class Trainer:
                 if self.current_iter % 100 == 0 or self.current_iter == 1:
                     print(f"Iter: {self.current_iter:<12} | Loss: {loss.item():<10.6f} | Time: {t1 - t0:<8.6f}")
 
-
                 if self.current_iter % self.save_every == 0:
                     self.batch_idx = idx
                     self._save_checkpoint()
@@ -345,20 +362,26 @@ class Trainer:
             for batch in self.val_loader:
                 # Move data to GPU
                 h = batch["h"].to(self.device, non_blocking=True)
-                y = batch["y"].to(self.device, non_blocking=True).squeeze(-1)
+                y = batch["y"].to(self.device, non_blocking=True)
 
-                with torch.cuda.amp.autocast():  # Mixed precision in evaluation
-                    output = self.model(h)  # output shape: (batch_size, seq_len, n_vocab)
-                    output = output[:, -1]  # Select the last token's output (batch_size, n_vocab)
-                    if output.dim() == 2 and output.size(-1) == 1:
-                        output = output.squeeze(-1)  # shape: (batch_size,)
-                    loss = F.mse_loss(output, y)
+                with torch.amp.autocast(device_type=self.device):  # Mixed precision in evaluation
+                    output = self.model(h)  # Pass the full input through the model
+                    output = output[:, ::2].squeeze(-1)
+
+                    # Only evaluate the very last example in the batch
+                    y_last = y[-1:]  # Select the last target value
+                    output_last = output[-1:]  # Select the last model output
+
+                    # print("y_last shape:", y_last.shape)
+                    # print("output_last shape:", output_last.shape)
+
+                    loss = F.mse_loss(output_last, y_last)
                     total_loss += loss.item()
                     count += 1
 
         val_loss = total_loss / count
         self.val_losses.append(val_loss)
-        print(f"Validation Loss (Iteration {self.current_iter}): {val_loss} in {count} batches")
+        print(f"Validation Loss (Iteration {self.current_iter}) for last examples: {val_loss} in {count} batches")
 
     def test(self):
         self.model.eval()
@@ -369,40 +392,46 @@ class Trainer:
         d_dim = self.training_config.get("d_dim", 10)
         hidden_d_dim = self.training_config.get("hidden_d_dim", 20)
         # Using the same number of validation samples as in _load_dataloader
-        num_val_samples = 15600  
+        num_val_samples = 2560
         batch_size = self.training_config["batch_size"]
+        num_layers = self.training_config["num_mlp_layers"]
 
         results = {}
         with torch.no_grad():
-            for n_examples_current in range(2, n_examples_max):
+            for n_examples_current in range(39, n_examples_max + 1):
                 # Create a new validation dataset and loader for the current n_examples
-                val_dataset = InContextValDataset(
+                test_dataset = InContextValDataset(
                     d_dim=d_dim,
                     hidden_d_dim=hidden_d_dim,
                     n_examples=n_examples_current,
                     tau=tau,
-                    num_val_samples=num_val_samples
+                    num_val_samples=num_val_samples,
+                    num_layers=num_layers,
                 )
-                test_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-
+                test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
                 total_loss = 0
                 count = 0
-
                 for batch in test_loader:
-                # Move data to GPU
+                    # Move data to GPU
                     h = batch["h"].to(self.device, non_blocking=True)
-                    y = batch["y"].to(self.device, non_blocking=True).squeeze(-1)
+                    y = batch["y"].to(self.device, non_blocking=True)
 
-                    with torch.cuda.amp.autocast():  # Mixed precision in evaluation
-                        output = self.model(h)  # output shape: (batch_size, seq_len, n_vocab)
-                        output = output[:, -1]  # Select the last token's output (batch_size, n_vocab)
-                        if output.dim() == 2 and output.size(-1) == 1:
-                            output = output.squeeze(-1)  # shape: (batch_size,)
-                        loss = F.mse_loss(output, y)
+                    with torch.amp.autocast(device_type=self.device):  # Mixed precision in evaluation
+                        output = self.model(h)  # Pass the full input through the model
+                        output = output[:, ::2].squeeze(-1)
+
+                        # Only evaluate the very last example in the batch
+                        y_last = y[-1:]  # Select the last target value
+                        output_last = output[-1:]  # Select the last model output
+
+                        # print("y_last shape:", y_last.shape)
+                        # print("output_last shape:", output_last.shape)
+
+                        loss = F.mse_loss(output_last, y_last)
                         total_loss += loss.item()
-                    count += 1
+                        count += 1
 
-                val_loss = total_loss / count if count > 0 else float('inf')
+                val_loss = total_loss / count if count > 0 else float("inf")
                 results[n_examples_current] = val_loss
                 print(f"Validation for n_examples={n_examples_current}: {val_loss}")
 
@@ -414,62 +443,62 @@ class Trainer:
         return results
 
 
+def plots(file1, file2):
+    """
+    Reads and plots data from four JSON files with custom titles for each line.
 
+    Args:
+        file1 (str): Path to the first JSON file.
+        file2 (str): Path to the second JSON file.
+        file3 (str): Path to the third JSON file.
+        file4 (str): Path to the fourth JSON file.
+    """
 
-def plots():
-    # Path to the checkpoint file
-    checkpoint_path = "diff_final.pth"
-    
-    # Load the checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    
-    # Extract the loss lists
-    train_losses_DX = checkpoint.get("train_losses", [])
-    val_losses_DX = checkpoint.get("val_losses", [])
+    # Load JSON data
+    def load_json(file):
+        with open(file, "r") as f:
+            return json.load(f)
 
-    checkpoint_path = "transformer_final.pth"
-    
-    # Load the checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    
-    # Extract the loss lists
-    train_losses_D = checkpoint.get("train_losses", [])
-    val_losses_D = checkpoint.get("val_losses", [])
+    data1 = load_json(file1)
+    data2 = load_json(file2)
 
+    # Extract data for plotting
+    def extract_data(data):
+        x = list(map(int, data.keys()))
+        y = list(data.values())
+        return x, y
 
-    # Plot training losses
+    x1, y1 = extract_data(data1)
+    x2, y2 = extract_data(data2)
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(train_losses_DX, label="Train Loss - diff", linewidth=2)
-    plt.plot(train_losses_D, label="Train Loss - transformer", linewidth=2)
-    plt.title("Training Loss Over Time")
-    plt.xlabel("Iterations")
-    plt.ylabel("Loss")
+    # Plot data with custom titles
+    plt.figure(figsize=(6, 5))
+
+    plt.plot(x1, y1, label=r"Diff $\sigma = 0.1$", linewidth=3)
+    plt.plot(x2, y2, label=r"Vanilla $\sigma = 0.1$", linewidth=3)
+
+    plt.xlabel("in-context examples")
+    plt.ylabel("square loss")
     plt.legend()
     plt.grid(True)
-    plt.savefig("train_loss_plot.png")
-    plt.close()
 
-    # Plot validation losses
-    plt.figure(figsize=(10, 6))
-    plt.plot(val_losses_DX, label="Val Loss - diff")
-    plt.plot(val_losses_D, label="Val Loss - transformer")
-    plt.title("Validation Loss Over Time")
-    plt.xlabel("Evaluation Steps")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("val_loss_plot.png")
-    plt.close()
+    # Show the plot
+    plt.savefig("ctxlen_test_sigmas.png")
+
+
+# Example usage
+# plot_json_files("file1.json", "file2.json", "file3.json", "file4.json")
+
+
+# Example usage
+# plot_json_files("file1.json", "file2.json", "file3.json", "file4.json")
 
 
 def main():
-    # plots()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    
-    print("--------------------------TRAINING DIFF TRANSFORMER---------------------------------")
+    print("--------------------------TRAINING DIFF TRANSFORMER 01 ---------------------------------")
 
     with open("config_ICL2_DX.yaml", "r") as file:
         training_config = yaml.safe_load(file)
@@ -483,38 +512,27 @@ def main():
     print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    trainer = Trainer(
-        model=model,
-        training_config=training_config,
-        optimizer=optimizer,
-        gpu_id=None,
-    )
+    trainer = Trainer(model=model, training_config=training_config, optimizer=optimizer, gpu_id=None, model_name="diff_01", sigma=0.1)
 
-    trainer.test()
+    trainer.train()
 
-    # print("--------------------------TRAINING VANILLIA TRANSFORMER---------------------------------")
+    print("--------------------------TRAINING VANILLIA TRANSFORMER---------------------------------")
 
-    # with open("config_ICL2_D.yaml", "r") as file:
-    #     training_config = yaml.safe_load(file)
+    with open("config_ICL2_D.yaml", "r") as file:
+        training_config = yaml.safe_load(file)
 
-    # lr = training_config["learning_rate"]
+    lr = training_config["learning_rate"]
 
-    # config = LMConfig(**LM_ARGS["122M"], is_diff=training_config["architecture"] == "DiffFormer")
-    # model = TransModel(config)
-    # model = torch.compile(model, mode="default", backend="inductor")
+    config = LMConfig(**LM_ARGS["122M"], is_diff=training_config["architecture"] == "DiffFormer")
+    model = TransModel(config)
+    model = torch.compile(model, mode="default", backend="inductor")
 
-    # print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    # optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    # trainer = Trainer(
-    #     model=model,
-    #     training_config=training_config,
-    #     optimizer=optimizer,
-    #     gpu_id=None,
-    # )
+    trainer = Trainer(model=model, training_config=training_config, optimizer=optimizer, gpu_id=None, model_name="trans_01", sigma=0.1)
 
-    # trainer.train()
-    
+    trainer.train()
 
 
 if __name__ == "__main__":

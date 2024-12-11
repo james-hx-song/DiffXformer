@@ -1,77 +1,70 @@
 import json
 from torch.utils.data import Dataset, DataLoader
-from datasets import Dataset as HFDataset
 from transformers import AutoTokenizer
-from typing import Optional
 import torch.nn.functional as F
 import torch
+from typing import Optional
+from tqdm import tqdm
 
-# --------- Helper Function to Load Data --------- #
-def load_data_from_json(file_path):
-    """
-    Reads a JSON file and returns a list of examples.
-    Each example is a dictionary containing various keys.
-    """
-    with open(file_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    import pdb; pdb.set_trace()
-    return data
+# --------- Custom Dataset Class --------- #
+class CustomJSONDataset(Dataset):
+    def __init__(self, file_path, tokenizer_name, n_ctx):
+        self.file_path = file_path
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
+        self.n_ctx = n_ctx
 
-# --------- Dataset Loading Function --------- #
-def load_dataloader(
-    batch_size: int,
-    tokenizer_name: str,
-    n_ctx: int,
-    train_file: str,
-    val_file: str,
-    test_file: str,
-    train_skip_samples: Optional[int] = None,
-    **kwargs
-):
+        # Read the JSON file and store the data references
+        with open(self.file_path, 'r', encoding='utf-8') as f:
+            self.data = json.load(f)
+        
+        self.ans = self.data['answers']
+        self.query = self.data['query']
+        self.passages = self.data['passages']
 
-    if train_skip_samples is None:
-        train_skip_samples = 0
+        # Store the keys for indexing
+        self.keys = list(self.ans.keys())
 
-    print("Loading Dataset...")
+    def __len__(self):
+        return len(self.keys)
 
-    # Load the data from the JSON files
-    train_examples = load_data_from_json(train_file)
-    val_examples = load_data_from_json(val_file)
-    test_examples = load_data_from_json(test_file)
-
-    # Create datasets from the examples
-    ds_train = HFDataset.from_list(train_examples)
-    ds_val = HFDataset.from_list(val_examples)
-    ds_test = HFDataset.from_list(test_examples)
-
-    # Optionally skip and take samples
-    ds_train = ds_train.select(range(train_skip_samples, len(ds_train)))
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-
-    def tokenize(example):
-        """
-        Tokenize the text into tensors. If text is longer than context length, then
-        split into smaller batches of context length. If smaller than context length,
-        add padding to match context length.
-
-        Args:
-            example (dict): Dictionary containing 'qa' key with 'question' and 'answer'.
-
-        Returns:
-            dict: Dictionary with 'input_ids', 'mask', and 'target_ids' tensors.
-        """
-        # Combine the question and answer for training
-        text = f"Question: {example['qa']['question']} Answer: {example['qa']['answer']}"
-        tokenized = tokenizer(
+    def __getitem__(self, idx):
+        key = self.keys[idx]
+        # Process the sample on-the-fly
+        text = ''
+        passage_idx = 1
+        for p in self.passages[key]:
+            if p['is_selected'] == 1:
+                text += f"Passage {passage_idx}: {p['passage_text']} "
+                passage_idx += 1
+        query = text + f"Query: {self.query[key]} Answer:"
+        text += f"Query: {self.query[key]} Answer:{self.ans[key][0]}"
+        answer = self.ans[key][0]
+        # Tokenize the text
+        tokenized = self.tokenizer(
             text,
             add_special_tokens=True,
             return_tensors='pt',
             padding=False,
             truncation=False
         )
+        
+        tokenized_query = self.tokenizer(
+            query,
+            add_special_tokens=True,
+            return_tensors='pt',
+            padding=False,
+            truncation=False
+        )
+        
+        tokenized_answer = self.tokenizer(
+            answer,
+            add_special_tokens=True,
+            return_tensors='pt',
+            padding=False,
+            truncation=False
+        )
 
-        max_len = n_ctx + 1
+        max_len = self.n_ctx + 1
 
         input_ids = tokenized['input_ids']  # shape [1, seq_len]
         attention_mask = tokenized['attention_mask']  # shape [1, seq_len]
@@ -84,7 +77,7 @@ def load_dataloader(
             input_ids,
             (0, padding_length),
             mode='constant',
-            value=tokenizer.pad_token_id
+            value=self.tokenizer.pad_token_id
         )
 
         padded_attention_mask = F.pad(
@@ -97,51 +90,107 @@ def load_dataloader(
         reshaped_input_ids = padded_input_ids.view(-1, max_len)
         reshaped_attention_mask = padded_attention_mask.view(-1, max_len)
 
-        input = reshaped_input_ids[:, :-1]
-        target = reshaped_input_ids[:, 1:]
+        input_ids = reshaped_input_ids[:, :-1]
+        target_ids = reshaped_input_ids[:, 1:]
 
         mask = reshaped_attention_mask[:, 1:]
+        
+        if answer == 'No Answer Present.':
+            mask = torch.zeros_like(mask)
 
-        assert input.shape[1] == n_ctx, f"Input shape: {input.shape}"
-        assert target.shape[1] == n_ctx, f"Target shape: {target.shape}"
+        assert input_ids.shape[1] == self.n_ctx, f"Input shape: {input_ids.shape}"
+        assert target_ids.shape[1] == self.n_ctx, f"Target shape: {target_ids.shape}"
 
+        # Compute lengths of query and answer
+        len_query = tokenized_query['input_ids'].shape[1]
+        len_answer = tokenized_answer['input_ids'].shape[1]
+
+        answer_mask = torch.zeros_like(mask)
+        answer_start = len_query - 1
+        answer_end = answer_start + len_answer
+        # Ensure indexing doesn't go beyond the sequence length
+        answer_end = min(answer_end, answer_mask.size(1))
+        if answer_start < answer_mask.size(1):
+            answer_mask[:, answer_start:answer_end] = 1
+            
         return {
-            'input_ids': input,
+            'input_ids': input_ids,
             'mask': mask,
-            'target_ids': target
+            'target_ids': target_ids,
+            'query': tokenized_query['input_ids'],
+            'answer': tokenized_answer['input_ids'],
+            'answer_mask': answer_mask
         }
 
-    ds_train = ds_train.map(
-        tokenize,
-        remove_columns=ds_train.column_names
-    )
+# --------- DataLoader Function --------- #
+def load_dataloader(
+    batch_size: int,
+    tokenizer_name: str,
+    n_ctx: int,
+    train_file: str,
+    val_file: str,
+    test_file: str,
+    train_skip_samples: Optional[int] = None,
+    **kwargs
+):
+    if train_skip_samples is None:
+        train_skip_samples = 0
 
-    ds_val = ds_val.map(
-        tokenize,
-        remove_columns=ds_val.column_names
-    )
+    print("Loading Datasets...")
 
-    ds_test = ds_test.map(
-        tokenize,
-        remove_columns=ds_test.column_names
-    )
+    # Create dataset instances
+    ds_train = CustomJSONDataset(train_file, tokenizer_name, n_ctx)
+    ds_val = CustomJSONDataset(val_file, tokenizer_name, n_ctx)
+    # ds_test = CustomJSONDataset(test_file, tokenizer_name, n_ctx)
+
+    # Optionally skip samples in the training set
+    if train_skip_samples > 0:
+        ds_train = torch.utils.data.Subset(ds_train, range(train_skip_samples, len(ds_train)))
 
     def collate_fn(batch):
         """
         Collate function to handle batching of variable-length sequences.
         """
-        input_ids = torch.cat([item['input_ids'] for item in batch], dim=0)
-        masks = torch.cat([item['mask'] for item in batch], dim=0)
-        target_ids = torch.cat([item['target_ids'] for item in batch], dim=0)
-        return {'input_ids': input_ids, 'mask': masks, 'target_ids': target_ids}
+        input_ids = []
+        masks = []
+        target_ids = []
+        query = []
+        answer = []
+        answer_mask = []
 
-    ds_train_loader = DataLoader(ds_train, batch_size=batch_size, collate_fn=collate_fn)
-    ds_val_loader = DataLoader(ds_val, batch_size=batch_size, collate_fn=collate_fn)
-    ds_test_loader = DataLoader(ds_test, batch_size=batch_size, collate_fn=collate_fn)
+        for item in batch:
+            input_ids.append(item['input_ids'])
+            masks.append(item['mask'])
+            target_ids.append(item['target_ids'])
+            query.append(item['query'])
+            answer.append(item['answer'])
+            answer_mask.append(item['answer_mask'])
 
-    return ds_train_loader, ds_val_loader, ds_test_loader
+        # Concatenate along batch dimension
+        input_ids = torch.cat(input_ids, dim=0)
+        masks = torch.cat(masks, dim=0)
+        target_ids = torch.cat(target_ids, dim=0)
+        query = torch.cat(query, dim=0)
+        answer = torch.cat(answer, dim=0)
+        answer_mask = torch.cat(answer_mask, dim=0)
+        
 
+        return {'input_ids': input_ids, 'mask': masks, 'target_ids': target_ids, 
+                'query': query, 'answer': answer,
+                'answer_mask': answer_mask
+                }
 
+    ds_train_loader = DataLoader(ds_train, batch_size=batch_size, 
+                                 num_workers=16,
+                                 collate_fn=collate_fn)
+    ds_val_loader = DataLoader(ds_val, batch_size=batch_size, 
+                               num_workers=16,
+                               collate_fn=collate_fn)
+    # ds_test_loader = DataLoader(ds_test, batch_size=batch_size, collate_fn=collate_fn)
+
+    return ds_train_loader, ds_val_loader, None
+
+# Example usage
 if __name__ == '__main__':
     batch_size = 8
     tokenizer_name = 'bert-base-uncased'  # Replace with your tokenizer
@@ -158,9 +207,11 @@ if __name__ == '__main__':
         val_file=val_file,
         test_file=test_file
     )
-    
+
     for batch in ds_train_loader:
-        print(batch['input_ids'].shape)
-        print(batch['mask'].shape)
-        print(batch['target_ids'].shape)
+        print("Input IDs shape:", batch['input_ids'].shape)
+        print("Mask shape:", batch['mask'].shape)
+        print("Target IDs shape:", batch['target_ids'].shape)
         break
+    
+    

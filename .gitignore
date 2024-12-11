@@ -166,6 +166,7 @@ cython_debug/
 .DS_Store
 wandb/
 checkpoints/
+*.json
 
 third_party/
 

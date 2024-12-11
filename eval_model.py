@@ -6,16 +6,18 @@ from lm_eval.api.instance import Instance
 import lm_eval
 import torch
 import json
+import datasets
 
 # import ssl
 # import certifi
 
 # # Add this line before any HTTPS requests
 # ssl._create_default_https_context = ssl._create_unverified_context
-task = "openbookqa"
+task = "boolq"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 is_diff = True
+datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
 
 print("Starting")
 
@@ -33,7 +35,13 @@ print("Model ready")
 tokenizer_name = "HuggingFaceTB/SmolLM-135M"
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-wrapper = TransformerWrapper(model, tokenizer_name, device)
+wrapper = TransformerWrapper(
+    model=model, 
+    tokenizer=tokenizer,
+    batch_size=4,
+    device=device,
+    model_type="custom"
+)
 
 # requests = [("context1", "continuation1"), ("context2", "continuation2")]
 # requests = [Instance("loglikelihood", {}, ( "context1", "continuation1"), 0), Instance("loglikelihood", {},( "context1", "continuation1"), 1)]
@@ -56,6 +64,7 @@ results = lm_eval.simple_evaluate(
     num_fewshot=0,
     task_manager=task_manager, 
     device=device,
+    cache_requests=True
 )
 
 with open(f'{task}_{name}_results.json', 'w') as f:

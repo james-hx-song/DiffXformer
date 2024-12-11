@@ -509,7 +509,7 @@ def main():
     for model_type in MODELS:
         print(f"--------------------------TRAINING {model_type.upper()} TRANSFORMER---------------------------------")
 
-        config_file = "config_ICL2_DX.yaml" if model_type == "DiffFormer" else "config_ICL2_D.yaml"
+        config_file = "./configs/config_ICL2_DX.yaml" if model_type == "DiffFormer" else "./configs/config_ICL2_D.yaml"
 
         with open(config_file, "r") as file:
             training_config = yaml.safe_load(file)
@@ -517,7 +517,7 @@ def main():
         lr = training_config["learning_rate"]
 
         config = LMConfig(**LM_ARGS["122M"], is_diff=model_type == "DiffFormer")
-        model = TransModel(config)
+        model = TransModel(config, is_icl=True)
         model = torch.compile(model, mode="default", backend="inductor")
 
         print(f"Number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")

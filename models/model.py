@@ -130,28 +130,39 @@ class Block(nn.Module):
 
 
 class TransModel(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, is_icl=False):
         super().__init__()
         self.config = config
+        self.is_icl = is_icl
 
         if config.is_diff:
             print("Using Differential Transformer")
         else:
             print("Using Vanilla Transformer")
 
-        self.projection = nn.Linear(in_features=20, out_features=config.n_embed)
+        if not is_icl:
+            self.blocks = nn.ModuleList([Block(config, i + 1) for i in range(config.n_layer)])
+            self.wte = nn.Embedding(config.n_vocab, config.n_embed)  # Token embeddings
 
-        self.blocks = nn.ModuleList([Block(config, i + 1) for i in range(config.n_layer)])
+            self.lm_head = nn.Linear(config.n_embed, config.n_vocab, bias=False)
 
-        # Removed embedding layer
-        # Removed weight tying since there's no embedding now
-        self.lm_head = nn.Linear(config.n_embed, 1, bias=False)
+            # Weight Sharing Scheme per Vaswani et al (2017)
+            self.lm_head.weight = self.wte.weight
+
+        else:
+            self.projection = nn.Linear(in_features=20, out_features=config.n_embed)
+
+            self.blocks = nn.ModuleList([Block(config, i + 1) for i in range(config.n_layer)])
+
+            self.lm_head = nn.Linear(config.n_embed, 1, bias=False)
 
     def forward(self, x):
         # Now x is expected to be of shape (B, T, n_embed) directly.
         assert x.size(1) <= self.config.n_ctx, "Context length exceeds model's maximum context length"
-
-        x = self.projection(x)
+        if not self.is_icl:
+            x = self.wte(x)
+        else:
+            x = self.projection(x)
 
         for block in self.blocks:
             x = block(x)

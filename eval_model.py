@@ -1,3 +1,4 @@
+import argparse
 from transformers import AutoTokenizer
 from models.model import TransModel
 from models.transformerWrapper import TransformerWrapper
@@ -8,25 +9,30 @@ import torch
 import json
 import datasets
 
-# import ssl
-# import certifi
+parser = argparse.ArgumentParser(description="Evaluate a model")
+parser.add_argument("--task", type=str, default="openbookqa")
+parser.add_argument("--model", type=str, default="DiffFormer")
+args = parser.parse_args()
 
-# # Add this line before any HTTPS requests
-# ssl._create_default_https_context = ssl._create_unverified_context
-task = "boolq"
+task = args.task
+model = args.model
+
+datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-is_diff = True
+is_diff = model == "DiffFormer"
 datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
 
 print("Starting")
 
-config = LMConfig(**LM_ARGS["122M"], is_diff=is_diff)
+print(f"Task: {task}")
+
+config = LMConfig(**LM_ARGS["122M"], is_diff=is_diff, n_ctx=2048)
 
 name = "DiffFormer" if is_diff else "Transformer"
 
 model = TransModel(config)
-checkpoint = torch.load(f"checkpoints/{name}/Iteration_40000.pth", map_location=device)
+checkpoint = torch.load(f"checkpoints/{name}/Iteration_40000_bk.pth", map_location=device)
 
 model.load_state_dict(checkpoint["model_state_dict"])
 print("Model ready")
